@@ -6,7 +6,6 @@ package onedrive
 // TODO context cancel
 // TODO run List on multiple threads for better performance
 // TODO unexport contants
-// TODO get rid of redundant be.filePath
 // TODO limit info returned by itemInfo and itemChildren
 
 import (
@@ -399,14 +398,9 @@ func (be *onedriveBackend) Location() string {
 	return be.basedir
 }
 
-// TODO this func is redundant, remove
-func (be *onedriveBackend) filePath(f restic.Handle) string {
-	return be.Filename(f)
-}
-
 // Test a boolean value whether a File with the name and type exists.
 func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, error) {
-	_, err := onedriveItemInfo(be.client, be.filePath(f))
+	_, err := onedriveItemInfo(be.client, be.Filename(f))
 	if err != nil {
 		if isNotExist(err) {
 			return false, nil
@@ -419,7 +413,7 @@ func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, err
 
 // Remove removes a File described  by h.
 func (be *onedriveBackend) Remove(ctx context.Context, f restic.Handle) error {
-	return onedriveItemDelete(be.client, be.filePath(f))
+	return onedriveItemDelete(be.client, be.Filename(f))
 }
 
 // Close the backend
@@ -429,7 +423,7 @@ func (be *onedriveBackend) Close() error {
 
 // Save stores the data in the backend under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
-	return onedriveItemUpload(be.client, be.filePath(f), rd, f.Type != restic.ConfigFile)
+	return onedriveItemUpload(be.client, be.Filename(f), rd, f.Type != restic.ConfigFile)
 }
 
 // Load returns a reader that yields the contents of the file at h at the
@@ -448,12 +442,12 @@ func (be *onedriveBackend) Load(ctx context.Context, f restic.Handle, length int
 		return nil, errors.Errorf("invalid length %d", length)
 	}
 
-	return onedriveItemContent(be.client, be.filePath(f), length, offset)
+	return onedriveItemContent(be.client, be.Filename(f), length, offset)
 }
 
 // Stat returns information about the File identified by h.
 func (be *onedriveBackend) Stat(ctx context.Context, f restic.Handle) (restic.FileInfo, error) {
-	item, err := onedriveItemInfo(be.client, be.filePath(f))
+	item, err := onedriveItemInfo(be.client, be.Filename(f))
 	if err != nil {
 		return restic.FileInfo{}, err
 	}
