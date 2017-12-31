@@ -1,10 +1,8 @@
 package onedrive
 
-// TODO skip long-running tests by default
 // TODO "proper" personal onedrive endpoint?
 // TODO logging
 // TODO context cancel
-// TODO unexport contants
 // TODO test-specific secrets file location
 // TODO make small/large/chunked upload threasholds configurable
 
