@@ -1,5 +1,6 @@
 package onedrive
 
+// TODO skip reccycle bin on delete
 // TODO "proper" personal onedrive endpoint?
 // TODO logging
 // TODO context cancel
@@ -533,6 +534,7 @@ func pathNames(path string) []string {
 	return names[:namesCount]
 }
 
+// creates specified folder and any missing parent folders
 func (be *onedriveBackend) createFolders(folderPath string) error {
 	// this is likely overkill, but I wanted to implement the following behaviour:
 	// * folders known to exist in are skipped without remote request
@@ -609,6 +611,7 @@ func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Read
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
+	// precreate parent directories to avoid intermittent "412/Precondition failed" errors
 	err := be.createFolders(be.Dirname(f))
 	if err != nil {
 		return err
