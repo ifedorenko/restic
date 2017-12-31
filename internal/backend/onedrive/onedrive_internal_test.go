@@ -81,7 +81,7 @@ func TestDirectoryNames(t *testing.T) {
 	assertArrayEquals(t, []string{"a", "a/b"}, pathNames("a//b"))
 }
 
-func TestCreateParentFolders(t *testing.T) {
+func TestCreateFolders(t *testing.T) {
 	client, err := newClient("")
 	if err != nil {
 		t.Errorf("failed to create http client %v", err)
@@ -93,9 +93,8 @@ func TestCreateParentFolders(t *testing.T) {
 		return
 	}
 
-	cfg := Config{
-		Prefix: prefix,
-	}
+	cfg := NewConfig()
+	cfg.Prefix = prefix
 
 	be, err := open(cfg, true)
 	if err != nil {

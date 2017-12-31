@@ -4,16 +4,27 @@ import (
 	"strings"
 
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/options"
 )
 
+// Config contains all configuration necessary to connect to OneDrive
 type Config struct {
 	SecretsFilePath string
 
 	Prefix string
+
+	Connections uint `option:"connections" help:"set a limit for the number of concurrent connections (default: 5)"`
 }
 
+// NewConfig returns a new Config with the default values filled in.
 func NewConfig() Config {
-	return Config{}
+	return Config{
+		Connections: 5,
+	}
+}
+
+func init() {
+	options.Register("onedrive", Config{})
 }
 
 func ParseConfig(s string) (interface{}, error) {
