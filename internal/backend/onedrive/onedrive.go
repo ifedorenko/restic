@@ -6,7 +6,6 @@ package onedrive
 // TODO context cancel
 // TODO unexport contants
 // TODO limit info returned by itemInfo and itemChildren
-// TODO limit number of concurrent http requests
 // TODO test-specific secrets file location
 
 import (
@@ -35,6 +34,9 @@ type onedriveBackend struct {
 	basedir string
 
 	client *http.Client
+
+	// used to limit number of concurrent remote requests
+	sem *backend.Semaphore
 
 	// see createParentFolders
 	folders     map[string]interface{}
@@ -426,11 +428,17 @@ func open(cfg Config, createNew bool) (*onedriveBackend, error) {
 		return nil, errors.Fatal("config file already exists")
 	}
 
+	sem, err := backend.NewSemaphore(cfg.Connections)
+	if err != nil {
+		return nil, err
+	}
+
 	be := &onedriveBackend{
 		Layout:  layout,
 		basedir: cfg.Prefix,
 		client:  client,
 		folders: make(map[string]interface{}),
+		sem:     sem,
 	}
 
 	if createNew {
@@ -465,6 +473,9 @@ func (be *onedriveBackend) Location() string {
 
 // Test a boolean value whether a File with the name and type exists.
 func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, error) {
+	be.sem.GetToken()
+	defer be.sem.ReleaseToken()
+
 	_, err := onedriveItemInfo(be.client, be.Filename(f))
 	if err != nil {
 		if isNotExist(err) {
@@ -478,6 +489,9 @@ func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, err
 
 // Remove removes a File described  by h.
 func (be *onedriveBackend) Remove(ctx context.Context, f restic.Handle) error {
+	be.sem.GetToken()
+	defer be.sem.ReleaseToken()
+
 	return onedriveItemDelete(be.client, be.Filename(f))
 }
 
@@ -522,7 +536,7 @@ func pathNames(path string) []string {
 }
 
 func (be *onedriveBackend) createFolders(folderPath string) error {
-	// this is likely overkill, but I wanted to implement the following behaviour
+	// this is likely overkill, but I wanted to implement the following behaviour:
 	// * folders known to exist in are skipped without remote request
 	//   (the assumption being, local sync is "free" in comparison to remote requests)
 	// * folders that are not known to exist are guaranteed to be created only once
@@ -594,6 +608,9 @@ func (be *onedriveBackend) createFolders(folderPath string) error {
 
 // Save stores the data in the backend under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
+	be.sem.GetToken()
+	defer be.sem.ReleaseToken()
+
 	err := be.createFolders(be.Dirname(f))
 	if err != nil {
 		return err
@@ -618,11 +635,22 @@ func (be *onedriveBackend) Load(ctx context.Context, f restic.Handle, length int
 		return nil, errors.Errorf("invalid length %d", length)
 	}
 
-	return onedriveItemContent(be.client, be.Filename(f), length, offset)
+	be.sem.GetToken()
+
+	rd, err := onedriveItemContent(be.client, be.Filename(f), length, offset)
+	if err != nil {
+		be.sem.ReleaseToken()
+		return nil, err
+	}
+
+	return be.sem.ReleaseTokenOnClose(rd, nil), nil
 }
 
 // Stat returns information about the File identified by h.
 func (be *onedriveBackend) Stat(ctx context.Context, f restic.Handle) (restic.FileInfo, error) {
+	be.sem.GetToken()
+	defer be.sem.ReleaseToken()
+
 	item, err := onedriveItemInfo(be.client, be.Filename(f))
 	if err != nil {
 		return restic.FileInfo{}, err
@@ -645,6 +673,13 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 		}
 	}
 
+	listChildren := func(path string, consumer func(driveItem) bool) error {
+		be.sem.GetToken()
+		defer be.sem.ReleaseToken()
+
+		return onedriveItemChildren(be.client, path, consumer)
+	}
+
 	go func() {
 		defer close(ch)
 
@@ -652,13 +687,13 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 
 		var err error
 		if !hasSubdirs {
-			err = onedriveItemChildren(be.client, prefix, resultForwarder)
+			err = listChildren(prefix, resultForwarder)
 		} else {
 			subdirs := map[string]bool{}
-			err = onedriveItemChildren(be.client, prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
+			err = listChildren(prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
 			if err == nil {
 				for subdir := range subdirs {
-					err = onedriveItemChildren(be.client, prefix+"/"+subdir, resultForwarder)
+					err = listChildren(prefix+"/"+subdir, resultForwarder)
 					if err != nil {
 						break
 					}
@@ -691,6 +726,9 @@ func (be *onedriveBackend) IsNotExist(err error) bool {
 
 // Delete removes all data in the backend.
 func (be *onedriveBackend) Delete(ctx context.Context) error {
+	be.sem.GetToken()
+	defer be.sem.ReleaseToken()
+
 	err := onedriveItemDelete(be.client, be.basedir)
 	if err != nil && !isNotExist(err) {
 		return err
