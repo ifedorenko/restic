@@ -135,6 +135,12 @@ func createTestFile(prefix string, size int64) (*os.File, error) {
 	return tmpfile, nil
 }
 
+func skipSlowTest(t *testing.T) {
+	if os.Getenv("ONEDRIVE_SLOW_TESTS") == "" {
+		t.Skip("skipping test; $ONEDRIVE_SLOW_TESTS is not set")
+	}
+}
+
 func assertUpload(t *testing.T, be restic.Backend, size int64) {
 	fmt.Printf("testing file size=%d...", size) // TODO how do I flush stdout here?
 	tmpfile, err := createTestFile(fmt.Sprintf("tmpfile-%d", size), size)
@@ -164,6 +170,8 @@ func assertUpload(t *testing.T, be restic.Backend, size int64) {
 }
 
 func TestLargeFileUpload(t *testing.T) {
+	skipSlowTest(t)
+
 	ctx := context.TODO()
 	be, err := createTestBackend()
 	if err != nil {
@@ -181,6 +189,8 @@ func TestLargeFileUpload(t *testing.T) {
 }
 
 func TestLargeFileImmutableUpload(t *testing.T) {
+	skipSlowTest(t)
+
 	ctx := context.TODO()
 	be, err := createTestBackend()
 	if err != nil {
@@ -208,6 +218,8 @@ func TestLargeFileImmutableUpload(t *testing.T) {
 }
 
 func TestListPaging(t *testing.T) {
+	skipSlowTest(t)
+
 	ctx := context.TODO()
 	be, err := createTestBackend()
 	if err != nil {
