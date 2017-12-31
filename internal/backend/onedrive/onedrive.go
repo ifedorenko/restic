@@ -4,9 +4,10 @@ package onedrive
 // TODO "proper" personal onedrive endpoint?
 // TODO logging
 // TODO context cancel
-// TODO run List on multiple threads for better performance
 // TODO unexport contants
 // TODO limit info returned by itemInfo and itemChildren
+// TODO limit number of concurrent http requests
+// TODO test-specific secrets file location
 
 import (
 	"context"
@@ -18,6 +19,8 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"strings"
+	"sync"
 
 	"github.com/restic/restic/internal/backend"
 	"github.com/restic/restic/internal/errors"
@@ -32,6 +35,10 @@ type onedriveBackend struct {
 	basedir string
 
 	client *http.Client
+
+	// see createParentFolders
+	folders     map[string]interface{}
+	foldersLock sync.Mutex
 
 	backend.Layout
 }
@@ -65,7 +72,7 @@ func newHTTPError(status string, statusCode int) httpError {
 //
 
 const (
-	onedriveBaseURL = "https://graph.microsoft.com/v1.0/me/drive/root:/"
+	onedriveBaseURL = "https://graph.microsoft.com/v1.0/me/drive/root"
 
 	// docs says direct PUT can upload "up to 4MB in size"
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_put_content
@@ -83,12 +90,12 @@ type driveItem struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Size int64  `json:"size"`
-	File struct {
-		MimeType string `json:"mimeType"`
-	} `json:"file"`
-	Folder struct {
-		ChildCount int `json:"childCount"`
-	} `json:"folder"`
+	// File struct {
+	// 	MimeType string `json:"mimeType"`
+	// } `json:"file"`
+	// Folder struct {
+	// 	ChildCount int `json:"childCount"`
+	// } `json:"folder"`
 }
 
 type driveItemChildren struct {
@@ -99,7 +106,7 @@ type driveItemChildren struct {
 func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
 	var item driveItem
 
-	req, err := http.NewRequest("GET", onedriveBaseURL+path, nil)
+	req, err := http.NewRequest("GET", onedriveBaseURL+":/"+path, nil)
 	if err != nil {
 		return item, err
 	}
@@ -119,7 +126,7 @@ func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
 }
 
 func onedriveItemChildren(client *http.Client, path string, consumer func(driveItem) bool) error {
-	url := onedriveBaseURL + path + ":/children"
+	url := onedriveBaseURL + ":/" + path + ":/children"
 OUTER:
 	for url != "" {
 		req, err := http.NewRequest("GET", url, nil)
@@ -150,7 +157,7 @@ OUTER:
 }
 
 func onedriveItemDelete(client *http.Client, path string) error {
-	req, err := http.NewRequest("DELETE", onedriveBaseURL+path, nil)
+	req, err := http.NewRequest("DELETE", onedriveBaseURL+":/"+path, nil)
 	if err != nil {
 		return err
 	}
@@ -163,6 +170,41 @@ func onedriveItemDelete(client *http.Client, path string) error {
 	// technicaly, only 204 is valid response here according to the docs
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_delete
 	if !isHTTPSuccess(resp.StatusCode) {
+		return newHTTPError(resp.Status, resp.StatusCode)
+	}
+
+	return nil
+}
+
+// creates folder if it does not already exist
+func onedriveCreateFolder(client *http.Client, parentPath string, name string) error {
+	body := fmt.Sprintf(`{"name":"%s", "folder": {}}`, name)
+	// TODO is there a better way to do string manipulations in golang?
+	var url string
+	if parentPath == "" {
+		url = onedriveBaseURL + "/children"
+	} else {
+		// OneDrive seems to tolerate folder names with trailing '/'
+		url = onedriveBaseURL + ":/" + parentPath + ":/children"
+	}
+	req, err := http.NewRequest("POST", url, strings.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-None-Match", "*")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// buf := new(bytes.Buffer)
+	// buf.ReadFrom(resp.Body)
+	// respBody := buf.String()
+	// fmt.Println(respBody)
+
+	if !isHTTPSuccess(resp.StatusCode) && resp.StatusCode != 412 {
 		return newHTTPError(resp.Status, resp.StatusCode)
 	}
 
@@ -211,7 +253,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutabl
 	if length < SmallUploadLength {
 		// use single-request PUT for small uploads
 
-		req, err := http.NewRequest("PUT", onedriveBaseURL+path+":/content", rd)
+		req, err := http.NewRequest("PUT", onedriveBaseURL+":/"+path+":/content", rd)
 		if err != nil {
 			return err
 		}
@@ -234,7 +276,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutabl
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession
 
 	// Create an upload session
-	req, err := http.NewRequest("POST", onedriveBaseURL+path+":/createUploadSession", nil)
+	req, err := http.NewRequest("POST", onedriveBaseURL+":/"+path+":/createUploadSession", nil)
 	if err != nil {
 		return err
 	}
@@ -284,7 +326,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutabl
 }
 
 func onedriveItemContent(client *http.Client, path string, length int, offset int64) (io.ReadCloser, error) {
-	req, err := http.NewRequest("GET", onedriveBaseURL+path+":/content", nil)
+	req, err := http.NewRequest("GET", onedriveBaseURL+":/"+path+":/content", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -320,10 +362,9 @@ type secretsFile struct {
 	} `json:"Token"`
 }
 
-func open(cfg Config) (*onedriveBackend, error) {
+func newClient(secretsFilePath string) (*http.Client, error) {
 	ctx := context.TODO()
 
-	secretsFilePath := cfg.SecretsFilePath
 	if secretsFilePath == "" {
 		me, err := user.Current()
 		if err != nil {
@@ -359,12 +400,20 @@ func open(cfg Config) (*onedriveBackend, error) {
 		Expiry:       secrets.Token.Expiry,
 	}
 
-	client := conf.Client(ctx, token)
+	return conf.Client(ctx, token), nil
+}
+
+func open(cfg Config) (*onedriveBackend, error) {
+	client, err := newClient(cfg.SecretsFilePath)
+	if err != nil {
+		return nil, err
+	}
 
 	return &onedriveBackend{
 		Layout:  &backend.DefaultLayout{Path: cfg.Prefix, Join: path.Join},
 		basedir: cfg.Prefix,
 		client:  client,
+		folders: make(map[string]interface{}),
 	}, nil
 }
 
@@ -421,8 +470,90 @@ func (be *onedriveBackend) Close() error {
 	return nil
 }
 
+func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
+	// this is likely overkill, but I wanted to implement the following behaviour
+	// * folders known to exist in are skipped without remote request
+	//   (the assumption being, local sync is "free" in comparison to remote requests)
+	// * folders that are not known to exist are guaranteed to be created only once
+	//   (including the case when multiple threads attempt to create the same folder)
+	// * different threads can concurrently create different folders
+	//
+	// onedriveBackend.folders map keeps track of all folders knowns to exist.
+	// access to the map is guarded by onedriveBackend.foldersLock mutex.
+	// the map key is the folder path string, the map value is one of the following
+	// * nil means the folder is not known to exist. first thread to create the folder
+	//   will assign the value to sync.Mutex
+	// * sync.Mutex means the folder needs to be created or is being created on another thread
+	//   a thread that got (or created) folder mutex does the following
+	//   - lock the folder mutex
+	//   - double-check in #foldersLock that the folder has not been created by another thread
+	//   - craete the folder
+	//   - set folder's map value to true
+	// * true (or any other value) means the folder is known to exist
+	//
+	// (really not comfortable with this. somebody please review or, better yet, tell me
+	// there is much easier solution and/or existing golang library I can use)
+
+	folderLock := func(path string) interface{} {
+		be.foldersLock.Lock()
+		defer be.foldersLock.Unlock()
+
+		lock := be.folders[path]
+		if lock == nil {
+			lock = sync.Mutex{}
+			be.folders[path] = lock
+		}
+
+		return lock
+	}
+
+	disableFolderLock := func(path string) {
+		be.foldersLock.Lock()
+		defer be.foldersLock.Unlock()
+		be.folders[path] = true
+	}
+
+	createMissingFolder := func(parentPath string, name string) error {
+		path := parentPath + "/" + name
+		lock := folderLock(path)
+		if mutex, ok := lock.(sync.Mutex); ok {
+			mutex.Lock()
+			defer mutex.Unlock()
+
+			// another thread could have created the folder while we waited on the mutex
+			if _, ok = folderLock(path).(sync.Mutex); ok {
+				err := onedriveCreateFolder(be.client, parentPath, name)
+				if err != nil {
+					return err
+				}
+				disableFolderLock(path)
+			}
+		}
+		return nil
+	}
+
+	parentPath := ""
+	for _, segment := range strings.Split(be.Dirname(f), "/") {
+		if segment == "" {
+			continue
+		}
+		err := createMissingFolder(parentPath, segment)
+		if err != nil {
+			return err
+		}
+		parentPath += segment + "/"
+	}
+
+	return nil
+}
+
 // Save stores the data in the backend under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
+	err := be.createParentFolders(f)
+	if err != nil {
+		return err
+	}
+
 	return onedriveItemUpload(be.client, be.Filename(f), rd, f.Type != restic.ConfigFile)
 }
 

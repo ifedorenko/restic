@@ -37,7 +37,7 @@ func createTestBackend() (restic.Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	be, err := onedrive.Create(cfg.(onedrive.Config))
+	be, err := onedrive.Create(cfg.(onedrive.Config), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -178,20 +178,20 @@ func newOnedriveTestSuite(t testing.TB) *test.Suite {
 		// CreateFn is a function that creates a temporary repository for the tests.
 		Create: func(config interface{}) (restic.Backend, error) {
 			cfg := config.(onedrive.Config)
-			return onedrive.Create(cfg)
+			return onedrive.Create(cfg, nil)
 		},
 
 		// OpenFn is a function that opens a previously created temporary repository.
 		Open: func(config interface{}) (restic.Backend, error) {
 			cfg := config.(onedrive.Config)
-			return onedrive.Open(cfg)
+			return onedrive.Open(cfg, nil)
 		},
 
 		// CleanupFn removes data created during the tests.
 		Cleanup: func(config interface{}) error {
 			cfg := config.(onedrive.Config)
 
-			be, err := onedrive.Open(cfg)
+			be, err := onedrive.Open(cfg, nil)
 			if err != nil {
 				if be.IsNotExist(err) {
 					return nil
