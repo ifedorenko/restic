@@ -1,11 +1,10 @@
 package onedrive
 
-// TODO skip reccycle bin on delete
-// TODO "proper" personal onedrive endpoint?
 // TODO logging
 // TODO context cancel
 // TODO test-specific secrets file location
 // TODO make small/large/chunked upload threasholds configurable
+// TODO skip recycle bin on delete (does not appear to be possible)
 
 import (
 	"context"
@@ -29,26 +28,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-type onedriveBackend struct {
-	basedir string
-
-	client *http.Client
-
-	// used to limit number of concurrent remote requests
-	sem *backend.Semaphore
-
-	// see createParentFolders
-	folders     map[string]interface{}
-	foldersLock sync.Mutex
-
-	backend.Layout
-}
-
-// Ensure that *Backend implements restic.Backend.
-var _ restic.Backend = &onedriveBackend{}
-
 //
-//
+// General helpers, likely duplicate code already available elsewhere
 //
 
 type httpError struct {
@@ -68,8 +49,52 @@ func newHTTPError(status string, statusCode int) httpError {
 	return httpError{statusCode: statusCode}
 }
 
+func isNotExist(err error) bool {
+	if herr, ok := err.(httpError); ok {
+		return herr.statusCode == 404
+	}
+
+	return false
+}
+
+// returns normalized path names up-to and including provided path
+// any leading and trailing '/' are removed, so are any redundant consequent '/'
+func pathNames(path string) []string {
+	// TODO this seems like a lot of code for what it does
+
+	segments := strings.Split(path, "/")
+	segmentIdx := 0
+
+	// skip leading path separatros, if any
+	for ; segmentIdx < len(segments) && segments[segmentIdx] == ""; segmentIdx++ {
+	}
+
+	if segmentIdx >= len(segments) {
+		return []string{} // TODO decide if there is a better empty result
+	}
+
+	parentPath := segments[segmentIdx]
+	segmentIdx++
+
+	names := make([]string, len(segments))
+	names[0] = parentPath
+	namesCount := 1
+
+	for ; segmentIdx < len(segments); segmentIdx++ {
+		segment := segments[segmentIdx]
+		if segment == "" {
+			continue
+		}
+		parentPath += "/" + segment
+		names[namesCount] = parentPath
+		namesCount++
+	}
+	return names[:namesCount]
+}
+
 //
-//
+// Low level OneDrive API calls
+// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/
 //
 
 const (
@@ -354,8 +379,27 @@ func onedriveItemContent(client *http.Client, path string, length int, offset in
 }
 
 //
+// restic.Backend implementation
+// actual OneDrive calls are done through low-level methods above
 //
-//
+
+type onedriveBackend struct {
+	basedir string
+
+	client *http.Client
+
+	// used to limit number of concurrent remote requests
+	sem *backend.Semaphore
+
+	// see createParentFolders
+	folders     map[string]interface{}
+	foldersLock sync.Mutex
+
+	backend.Layout
+}
+
+// Ensure that *Backend implements restic.Backend.
+var _ restic.Backend = &onedriveBackend{}
 
 type secretsFile struct {
 	ClientID     string `json:"ClientID"`
@@ -497,41 +541,6 @@ func (be *onedriveBackend) Remove(ctx context.Context, f restic.Handle) error {
 // Close the backend
 func (be *onedriveBackend) Close() error {
 	return nil
-}
-
-// returns normalized path names up-to and including provided path
-// any leading and trailing '/' are removed, so are any redundant consequent '/'
-func pathNames(path string) []string {
-	// TODO this seems like a lot of code for what it does
-
-	segments := strings.Split(path, "/")
-	segmentIdx := 0
-
-	// skip leading path separatros, if any
-	for ; segmentIdx < len(segments) && segments[segmentIdx] == ""; segmentIdx++ {
-	}
-
-	if segmentIdx >= len(segments) {
-		return []string{} // TODO decide if there is a better empty result
-	}
-
-	parentPath := segments[segmentIdx]
-	segmentIdx++
-
-	names := make([]string, len(segments))
-	names[0] = parentPath
-	namesCount := 1
-
-	for ; segmentIdx < len(segments); segmentIdx++ {
-		segment := segments[segmentIdx]
-		if segment == "" {
-			continue
-		}
-		parentPath += "/" + segment
-		names[namesCount] = parentPath
-		namesCount++
-	}
-	return names[:namesCount]
 }
 
 // creates specified folder and any missing parent folders
@@ -709,14 +718,6 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 
 	return ch
 
-}
-
-func isNotExist(err error) bool {
-	if herr, ok := err.(httpError); ok {
-		return herr.statusCode == 404
-	}
-
-	return false
 }
 
 // IsNotExist returns true if the error was caused by a non-existing file
