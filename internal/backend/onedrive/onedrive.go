@@ -6,6 +6,7 @@ package onedrive
 // TODO context cancel
 // TODO unexport contants
 // TODO test-specific secrets file location
+// TODO make small/large/chunked upload threasholds configurable
 
 import (
 	"context"
@@ -77,12 +78,12 @@ const (
 
 	// docs says direct PUT can upload "up to 4MB in size"
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_put_content
-	SmallUploadLength = 4 * 1000 * 1000
+	smallUploadLength = 4 * 1000 * 1000
 
 	// From https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession#best-practices
 	// Use a byte range size that is a multiple of 320 KiB (327,680 bytes)
 	// The recommended fragment size is between 5-10 MiB.
-	LargeUploadFragmentSize = 327680 * 30 // little over 9 MiB
+	largeUploadFragmentSize = 327680 * 30 // little over 9 MiB
 )
 
 type driveItem struct {
@@ -255,7 +256,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 	// make sure that client.Post() cannot close the reader by wrapping it
 	rd = ioutil.NopCloser(rd)
 
-	if length < SmallUploadLength {
+	if length < smallUploadLength {
 		// use single-request PUT for small uploads
 
 		req, err := http.NewRequest("PUT", onedriveBaseURL+":/"+path+":/content", rd)
@@ -305,10 +306,10 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 		return err
 	}
 
-	for pos := int64(0); pos < length; pos += LargeUploadFragmentSize {
+	for pos := int64(0); pos < length; pos += largeUploadFragmentSize {
 		fragmentSize := length - pos
-		if fragmentSize > LargeUploadFragmentSize {
-			fragmentSize = LargeUploadFragmentSize
+		if fragmentSize > largeUploadFragmentSize {
+			fragmentSize = largeUploadFragmentSize
 		}
 		req, err = http.NewRequest("PUT", uploadSession.UploadURL, io.LimitReader(rd, fragmentSize))
 		if err != nil {
