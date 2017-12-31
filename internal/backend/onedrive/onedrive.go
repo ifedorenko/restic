@@ -5,7 +5,6 @@ package onedrive
 // TODO logging
 // TODO context cancel
 // TODO unexport contants
-// TODO limit info returned by itemInfo and itemChildren
 // TODO test-specific secrets file location
 
 import (
@@ -87,9 +86,9 @@ const (
 )
 
 type driveItem struct {
-	CTag string `json:"cTag"`
-	ETag string `json:"eTag"`
-	ID   string `json:"id"`
+	// CTag string `json:"cTag"`
+	// ETag string `json:"eTag"`
+	// ID   string `json:"id"`
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 	// File struct {
@@ -128,7 +127,7 @@ func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
 }
 
 func onedriveItemChildren(client *http.Client, path string, consumer func(driveItem) bool) error {
-	url := onedriveBaseURL + ":/" + path + ":/children"
+	url := onedriveBaseURL + ":/" + path + ":/children?select=name"
 OUTER:
 	for url != "" {
 		req, err := http.NewRequest("GET", url, nil)
@@ -243,7 +242,7 @@ func readerSize(rd io.Reader) (int64, error) {
 	return size, nil
 }
 
-// fails if overwriteIfExists==false
+// fails if overwriteIfExists==false and the item exists
 func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
 	length, err := readerSize(rd)
 	if err != nil {
