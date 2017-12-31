@@ -171,13 +171,13 @@ func TestLargeFileUpload(t *testing.T) {
 	}
 	defer be.Delete(ctx)
 
-	assertUpload(t, be, LargeUploadFragmentSize-1)
-	assertUpload(t, be, LargeUploadFragmentSize)
-	assertUpload(t, be, LargeUploadFragmentSize+1)
+	assertUpload(t, be, largeUploadFragmentSize-1)
+	assertUpload(t, be, largeUploadFragmentSize)
+	assertUpload(t, be, largeUploadFragmentSize+1)
 
-	assertUpload(t, be, 3*LargeUploadFragmentSize-1)
-	assertUpload(t, be, 3*LargeUploadFragmentSize)
-	assertUpload(t, be, 3*LargeUploadFragmentSize+1)
+	assertUpload(t, be, 3*largeUploadFragmentSize-1)
+	assertUpload(t, be, 3*largeUploadFragmentSize)
+	assertUpload(t, be, 3*largeUploadFragmentSize+1)
 }
 
 func TestLargeFileImmutableUpload(t *testing.T) {
