@@ -3,10 +3,9 @@ package onedrive
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
-
-	"github.com/restic/restic/internal/restic"
 )
 
 func assertNotExist(t *testing.T, client *http.Client, path string) bool {
@@ -44,9 +43,8 @@ func TestCreateFolder(t *testing.T) {
 		onedriveItemDelete(client, "a")
 	}()
 
-	assertCreateFolder := func(parentPath string, name string) {
-		err := onedriveCreateFolder(client, parentPath, name)
-		path := parentPath + "/" + name
+	assertCreateFolder := func(path string) {
+		err := onedriveCreateFolder(client, path)
 		if err != nil {
 			t.Errorf("could not create folder %s: %v", path, err)
 			return
@@ -55,12 +53,32 @@ func TestCreateFolder(t *testing.T) {
 	}
 
 	// test create new folder and subfolder
-	assertCreateFolder("", "a")
-	assertCreateFolder("a/", "b")
+	assertCreateFolder("a")
+	assertCreateFolder("a/b")
 
 	// test create existing folders
-	assertCreateFolder("", "a")
-	assertCreateFolder("a/", "b")
+	assertCreateFolder("a")
+	assertCreateFolder("a/b")
+}
+
+func assertArrayEquals(t *testing.T, expected []string, actual []string) {
+	if reflect.DeepEqual(expected, actual) {
+		return
+	}
+	t.Fatal(fmt.Sprintf("expected %v but got %v", expected, actual))
+}
+
+func TestDirectoryNames(t *testing.T) {
+	assertArrayEquals(t, []string{}, pathNames(""))
+	assertArrayEquals(t, []string{}, pathNames("/"))
+
+	assertArrayEquals(t, []string{"a"}, pathNames("a"))
+	assertArrayEquals(t, []string{"a"}, pathNames("a/"))
+	assertArrayEquals(t, []string{"a"}, pathNames("/a/"))
+	assertArrayEquals(t, []string{"a"}, pathNames("a//"))
+
+	assertArrayEquals(t, []string{"a", "a/b"}, pathNames("a/b"))
+	assertArrayEquals(t, []string{"a", "a/b"}, pathNames("a//b"))
 }
 
 func TestCreateParentFolders(t *testing.T) {
@@ -79,18 +97,13 @@ func TestCreateParentFolders(t *testing.T) {
 		Prefix: prefix,
 	}
 
-	be, err := open(cfg)
+	be, err := open(cfg, true)
 	if err != nil {
 		t.Errorf("could not create backend %v", err)
 		return
 	}
 
-	f := restic.Handle{
-		Type: restic.DataFile,
-		Name: "test",
-	}
-
-	err = be.createParentFolders(f)
+	err = be.createFolders("data/aa")
 	if err != nil {
 		t.Errorf("could not create backend %v", err)
 		return

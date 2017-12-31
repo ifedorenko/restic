@@ -177,16 +177,19 @@ func onedriveItemDelete(client *http.Client, path string) error {
 }
 
 // creates folder if it does not already exist
-func onedriveCreateFolder(client *http.Client, parentPath string, name string) error {
-	body := fmt.Sprintf(`{"name":"%s", "folder": {}}`, name)
-	// TODO is there a better way to do string manipulations in golang?
-	var url string
-	if parentPath == "" {
+func onedriveCreateFolder(client *http.Client, path string) error {
+	var url, name string
+	nameIdx := strings.LastIndex(path, "/")
+	if nameIdx < 0 {
+		name = path
 		url = onedriveBaseURL + "/children"
 	} else {
-		// OneDrive seems to tolerate folder names with trailing '/'
-		url = onedriveBaseURL + ":/" + parentPath + ":/children"
+		name = path[nameIdx+1:]
+		url = onedriveBaseURL + ":/" + path[:nameIdx] + ":/children"
 	}
+
+	body := fmt.Sprintf(`{"name":"%s", "folder": {}}`, name)
+	// TODO is there a better way to do string manipulations in golang?
 	req, err := http.NewRequest("POST", url, strings.NewReader(body))
 	if err != nil {
 		return err
@@ -238,7 +241,8 @@ func readerSize(rd io.Reader) (int64, error) {
 	return size, nil
 }
 
-func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutable bool) error {
+// fails if overwriteIfExists==false
+func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
 	length, err := readerSize(rd)
 	if err != nil {
 		return err
@@ -258,7 +262,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutabl
 			return err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
-		if immutable {
+		if !overwriteIfExists {
 			req.Header.Set("If-None-Match", "*")
 		}
 		resp, err := client.Do(req)
@@ -281,7 +285,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, immutabl
 		return err
 	}
 	req.Header.Set("Content-Type", "binary/octet-stream")
-	if immutable {
+	if !overwriteIfExists {
 		req.Header.Set("If-None-Match", "*")
 	}
 	resp, err := client.Do(req)
@@ -403,18 +407,40 @@ func newClient(secretsFilePath string) (*http.Client, error) {
 	return conf.Client(ctx, token), nil
 }
 
-func open(cfg Config) (*onedriveBackend, error) {
+func open(cfg Config, createNew bool) (*onedriveBackend, error) {
 	client, err := newClient(cfg.SecretsFilePath)
 	if err != nil {
 		return nil, err
 	}
 
-	return &onedriveBackend{
-		Layout:  &backend.DefaultLayout{Path: cfg.Prefix, Join: path.Join},
+	layout := &backend.DefaultLayout{Path: cfg.Prefix, Join: path.Join}
+
+	configFile := restic.Handle{Type: restic.ConfigFile}
+
+	_, err = onedriveItemInfo(client, layout.Filename(configFile))
+	if err != nil && !isNotExist(err) {
+		return nil, err // could not query remote
+	}
+
+	if err == nil && createNew {
+		return nil, errors.Fatal("config file already exists")
+	}
+
+	be := &onedriveBackend{
+		Layout:  layout,
 		basedir: cfg.Prefix,
 		client:  client,
 		folders: make(map[string]interface{}),
-	}, nil
+	}
+
+	if createNew {
+		err = be.createFolders(cfg.Prefix)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return be, nil
 }
 
 //
@@ -423,22 +449,12 @@ func open(cfg Config) (*onedriveBackend, error) {
 
 // Open opens the onedrive backend.
 func Open(cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	return open(cfg)
+	return open(cfg, false)
 }
 
 // Create creates and opens the onedrive backend.
 func Create(cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	be, err := open(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = be.Stat(context.TODO(), restic.Handle{Type: restic.ConfigFile})
-	if err == nil {
-		return nil, errors.Fatal("config file already exists")
-	}
-
-	return be, nil
+	return open(cfg, true)
 }
 
 // Location returns a string that describes the type and location of the
@@ -470,7 +486,42 @@ func (be *onedriveBackend) Close() error {
 	return nil
 }
 
-func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
+// returns normalized path names up-to and including provided path
+// any leading and trailing '/' are removed, so are any redundant consequent '/'
+func pathNames(path string) []string {
+	// TODO this seems like a lot of code for what it does
+
+	segments := strings.Split(path, "/")
+	segmentIdx := 0
+
+	// skip leading path separatros, if any
+	for ; segmentIdx < len(segments) && segments[segmentIdx] == ""; segmentIdx++ {
+	}
+
+	if segmentIdx >= len(segments) {
+		return []string{} // TODO decide if there is a better empty result
+	}
+
+	parentPath := segments[segmentIdx]
+	segmentIdx++
+
+	names := make([]string, len(segments))
+	names[0] = parentPath
+	namesCount := 1
+
+	for ; segmentIdx < len(segments); segmentIdx++ {
+		segment := segments[segmentIdx]
+		if segment == "" {
+			continue
+		}
+		parentPath += "/" + segment
+		names[namesCount] = parentPath
+		namesCount++
+	}
+	return names[:namesCount]
+}
+
+func (be *onedriveBackend) createFolders(folderPath string) error {
 	// this is likely overkill, but I wanted to implement the following behaviour
 	// * folders known to exist in are skipped without remote request
 	//   (the assumption being, local sync is "free" in comparison to remote requests)
@@ -513,8 +564,7 @@ func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
 		be.folders[path] = true
 	}
 
-	createMissingFolder := func(parentPath string, name string) error {
-		path := parentPath + "/" + name
+	ifCreateFolder := func(path string) error {
 		lock := folderLock(path)
 		if mutex, ok := lock.(sync.Mutex); ok {
 			mutex.Lock()
@@ -522,7 +572,7 @@ func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
 
 			// another thread could have created the folder while we waited on the mutex
 			if _, ok = folderLock(path).(sync.Mutex); ok {
-				err := onedriveCreateFolder(be.client, parentPath, name)
+				err := onedriveCreateFolder(be.client, path)
 				if err != nil {
 					return err
 				}
@@ -532,16 +582,11 @@ func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
 		return nil
 	}
 
-	parentPath := ""
-	for _, segment := range strings.Split(be.Dirname(f), "/") {
-		if segment == "" {
-			continue
-		}
-		err := createMissingFolder(parentPath, segment)
+	for _, path := range pathNames(folderPath) {
+		err := ifCreateFolder(path)
 		if err != nil {
 			return err
 		}
-		parentPath += segment + "/"
 	}
 
 	return nil
@@ -549,12 +594,12 @@ func (be *onedriveBackend) createParentFolders(f restic.Handle) error {
 
 // Save stores the data in the backend under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
-	err := be.createParentFolders(f)
+	err := be.createFolders(be.Dirname(f))
 	if err != nil {
 		return err
 	}
 
-	return onedriveItemUpload(be.client, be.Filename(f), rd, f.Type != restic.ConfigFile)
+	return onedriveItemUpload(be.client, be.Filename(f), rd, f.Type == restic.ConfigFile)
 }
 
 // Load returns a reader that yields the contents of the file at h at the
