@@ -34,7 +34,7 @@ func assertExist(t *testing.T, client *http.Client, path string) {
 }
 
 func TestCreateFolder(t *testing.T) {
-	client, err := newClient("")
+	client, err := newClient(context.TODO(), "")
 	if err != nil {
 		t.Errorf("failed to create http client %v", err)
 		return
