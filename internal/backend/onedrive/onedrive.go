@@ -18,14 +18,14 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
+
+	ncontext "golang.org/x/net/context"
+	"golang.org/x/oauth2"
 
 	"github.com/restic/restic/internal/backend"
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/restic"
-
-	"time"
-
-	"golang.org/x/oauth2"
 )
 
 //
@@ -51,10 +51,16 @@ func newHTTPError(status string, statusCode int) httpError {
 
 func isNotExist(err error) bool {
 	if herr, ok := err.(httpError); ok {
-		return herr.statusCode == 404
+		return herr.statusCode == http.StatusNotFound
 	}
 
 	return false
+}
+
+func drainAndCloseBody(body io.ReadCloser) {
+	// https://stackoverflow.com/questions/17948827/reusing-http-connections-in-golang
+	io.Copy(ioutil.Discard, body)
+	body.Close()
 }
 
 // returns normalized path names up-to and including provided path
@@ -191,7 +197,7 @@ func onedriveItemDelete(client *http.Client, path string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	drainAndCloseBody(resp.Body)
 
 	// technicaly, only 204 is valid response here according to the docs
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_delete
@@ -226,14 +232,14 @@ func onedriveCreateFolder(client *http.Client, path string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	drainAndCloseBody(resp.Body)
 
 	// buf := new(bytes.Buffer)
 	// buf.ReadFrom(resp.Body)
 	// respBody := buf.String()
 	// fmt.Println(respBody)
 
-	if !isHTTPSuccess(resp.StatusCode) && resp.StatusCode != 412 {
+	if !isHTTPSuccess(resp.StatusCode) && resp.StatusCode != http.StatusPreconditionFailed {
 		return newHTTPError(resp.Status, resp.StatusCode)
 	}
 
@@ -295,7 +301,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		drainAndCloseBody(resp.Body)
 		if !isHTTPSuccess(resp.StatusCode) {
 			return newHTTPError(resp.Status, resp.StatusCode)
 		}
@@ -305,48 +311,55 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 	// for larger uploads use multi-request upload session
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession
 
-	// Create an upload session
-	req, err := http.NewRequest("POST", onedriveBaseURL+":/"+path+":/createUploadSession", nil)
+	// Create the upload session
+	uploadURL, err := func() (string, error) {
+		req, err := http.NewRequest("POST", onedriveBaseURL+":/"+path+":/createUploadSession", nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "binary/octet-stream")
+		if !overwriteIfExists {
+			req.Header.Set("If-None-Match", "*")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer drainAndCloseBody(resp.Body)
+		if !isHTTPSuccess(resp.StatusCode) {
+			return "", newHTTPError(resp.Status, resp.StatusCode)
+		}
+		var uploadSession struct {
+			UploadURL          string    `json:"uploadUrl"`
+			ExpirationDateTime time.Time `json:"expirationDateTime"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&uploadSession); err != nil {
+			return "", err
+		}
+		return uploadSession.UploadURL, nil
+	}()
 	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "binary/octet-stream")
-	if !overwriteIfExists {
-		req.Header.Set("If-None-Match", "*")
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if !isHTTPSuccess(resp.StatusCode) {
-		return newHTTPError(resp.Status, resp.StatusCode)
-	}
-	var uploadSession struct {
-		UploadURL          string    `json:"uploadUrl"`
-		ExpirationDateTime time.Time `json:"expirationDateTime"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&uploadSession); err != nil {
 		return err
 	}
 
+	// Use the session to upload individual fragments
 	for pos := int64(0); pos < length; pos += largeUploadFragmentSize {
 		fragmentSize := length - pos
 		if fragmentSize > largeUploadFragmentSize {
 			fragmentSize = largeUploadFragmentSize
 		}
-		req, err = http.NewRequest("PUT", uploadSession.UploadURL, io.LimitReader(rd, fragmentSize))
+		req, err := http.NewRequest("PUT", uploadURL, io.LimitReader(rd, fragmentSize))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
 		req.Header.Add("Content-Length", fmt.Sprintf("%d", fragmentSize))
 		req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pos, pos+fragmentSize-1, length))
-		resp, err = client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return err
 		}
-		resp.Body.Close()
+		drainAndCloseBody(resp.Body)
 		if !isHTTPSuccess(resp.StatusCode) {
 			return newHTTPError(resp.Status, resp.StatusCode)
 		}
@@ -372,7 +385,7 @@ func onedriveItemContent(client *http.Client, path string, length int, offset in
 		return nil, err
 	}
 	if !isHTTPSuccess(resp.StatusCode) {
-		resp.Body.Close()
+		drainAndCloseBody(resp.Body)
 		return nil, newHTTPError(resp.Status, resp.StatusCode)
 	}
 	return resp.Body, nil
@@ -411,9 +424,7 @@ type secretsFile struct {
 	} `json:"Token"`
 }
 
-func newClient(secretsFilePath string) (*http.Client, error) {
-	ctx := context.TODO()
-
+func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error) {
 	if secretsFilePath == "" {
 		me, err := user.Current()
 		if err != nil {
@@ -452,8 +463,15 @@ func newClient(secretsFilePath string) (*http.Client, error) {
 	return conf.Client(ctx, token), nil
 }
 
-func open(cfg Config, createNew bool) (*onedriveBackend, error) {
-	client, err := newClient(cfg.SecretsFilePath)
+func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, error) {
+	hc := &http.Client{
+		Transport: &http.Transport{
+			// http connection pool size=2 by default
+			MaxIdleConnsPerHost: int(cfg.Connections),
+		},
+	}
+	ctx = ncontext.WithValue(ctx, oauth2.HTTPClient, hc)
+	client, err := newClient(ctx, cfg.SecretsFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -499,13 +517,13 @@ func open(cfg Config, createNew bool) (*onedriveBackend, error) {
 //
 
 // Open opens the onedrive backend.
-func Open(cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	return open(cfg, false)
+func Open(ctx context.Context, cfg Config, rt http.RoundTripper) (restic.Backend, error) {
+	return open(ctx, cfg, false)
 }
 
 // Create creates and opens the onedrive backend.
-func Create(cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	return open(cfg, true)
+func Create(ctx context.Context, cfg Config, rt http.RoundTripper) (restic.Backend, error) {
+	return open(ctx, cfg, true)
 }
 
 // Location returns a string that describes the type and location of the
