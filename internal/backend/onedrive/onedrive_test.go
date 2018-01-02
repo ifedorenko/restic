@@ -31,20 +31,20 @@ func newOnedriveTestSuite(t testing.TB) *test.Suite {
 		// CreateFn is a function that creates a temporary repository for the tests.
 		Create: func(config interface{}) (restic.Backend, error) {
 			cfg := config.(onedrive.Config)
-			return onedrive.Create(cfg, nil)
+			return onedrive.Create(context.TODO(), cfg, nil)
 		},
 
 		// OpenFn is a function that opens a previously created temporary repository.
 		Open: func(config interface{}) (restic.Backend, error) {
 			cfg := config.(onedrive.Config)
-			return onedrive.Open(cfg, nil)
+			return onedrive.Open(context.TODO(), cfg, nil)
 		},
 
 		// CleanupFn removes data created during the tests.
 		Cleanup: func(config interface{}) error {
 			cfg := config.(onedrive.Config)
 
-			be, err := onedrive.Open(cfg, nil)
+			be, err := onedrive.Open(context.TODO(), cfg, nil)
 			if err != nil {
 				if be.IsNotExist(err) {
 					return nil
