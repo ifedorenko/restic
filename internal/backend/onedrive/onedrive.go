@@ -1,11 +1,12 @@
 package onedrive
 
 // TODO logging
-// TODO context cancel and cleanup of partially uploaded files
+// TODO context cancel
 // TODO test-specific secrets file location
-// TODO make small/large/chunked upload threasholds configurable
+// TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
 //      or empty recycle bin as part of delete
+// TODO consider adding HTTP METHOD/PATH to httpError
 
 import (
 	"context"
@@ -39,6 +40,10 @@ type httpError struct {
 }
 
 func (e httpError) Error() string {
+	return e.status
+}
+
+func (e httpError) String() string {
 	return e.status
 }
 
@@ -107,14 +112,10 @@ func pathNames(path string) []string {
 const (
 	onedriveBaseURL = "https://graph.microsoft.com/v1.0/me/drive/root"
 
-	// docs says direct PUT can upload "up to 4MB in size"
-	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_put_content
-	smallUploadLength = 4 * 1000 * 1000
-
 	// From https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession#best-practices
 	// Use a byte range size that is a multiple of 320 KiB (327,680 bytes)
 	// The recommended fragment size is between 5-10 MiB.
-	largeUploadFragmentSize = 327680 * 30 // little over 9 MiB
+	uploadFragmentSize = 327680 * 30 // little over 9 MiB
 )
 
 type driveItem struct {
@@ -287,29 +288,7 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 	// make sure that client.Post() cannot close the reader by wrapping it
 	rd = ioutil.NopCloser(rd)
 
-	if length < smallUploadLength {
-		// use single-request PUT for small uploads
-
-		req, err := http.NewRequest("PUT", onedriveBaseURL+":/"+path+":/content", rd)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "binary/octet-stream")
-		if !overwriteIfExists {
-			req.Header.Set("If-None-Match", "*")
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		drainAndCloseBody(resp.Body)
-		if !isHTTPSuccess(resp.StatusCode) {
-			return newHTTPError(resp.Status, resp.StatusCode)
-		}
-		return nil
-	}
-
-	// for larger uploads use multi-request upload session
+	// will always use POST+PUT sequence to upload items
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession
 
 	// Create the upload session
@@ -344,18 +323,18 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 	}
 
 	// Use the session to upload individual fragments
-	for pos := int64(0); pos < length; pos += largeUploadFragmentSize {
-		fragmentSize := length - pos
-		if fragmentSize > largeUploadFragmentSize {
-			fragmentSize = largeUploadFragmentSize
+	for pos := int64(0); pos < length; pos += uploadFragmentSize {
+		contentLength := length - pos
+		if contentLength > uploadFragmentSize {
+			contentLength = uploadFragmentSize
 		}
-		req, err := http.NewRequest("PUT", uploadURL, io.LimitReader(rd, fragmentSize))
+		req, err := http.NewRequest("PUT", uploadURL, io.LimitReader(rd, contentLength))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
-		req.Header.Add("Content-Length", fmt.Sprintf("%d", fragmentSize))
-		req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pos, pos+fragmentSize-1, length))
+		req.Header.Add("Content-Length", fmt.Sprintf("%d", contentLength))
+		req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pos, pos+contentLength-1, length))
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
@@ -365,6 +344,11 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 			return newHTTPError(resp.Status, resp.StatusCode)
 		}
 	}
+
+	// never use single-PUT
+	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_put_content
+	// - creates incomplete files if interrupted
+	// - most upload items are over "up to 4MB in size" limit
 
 	return nil
 }
