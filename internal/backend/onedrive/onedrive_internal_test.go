@@ -13,39 +13,37 @@ import (
 	"testing"
 	"time"
 
-	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/restic"
 )
 
-func assertNotExist(t *testing.T, client *http.Client, path string) bool {
+func assertNotExist(t *testing.T, client *http.Client, path string) {
 	_, err := onedriveItemInfo(client, path)
 	if !isNotExist(err) {
-		t.Errorf("expected item %s to not exist, got %v", path, err)
-		return false
+		t.Fatalf("expected item %s to not exist, got %v", path, err)
 	}
-	return true
 }
 
 func assertExist(t *testing.T, client *http.Client, path string) {
 	_, err := onedriveItemInfo(client, path)
 	if err != nil {
-		t.Errorf("expected item %s to exist, got %v", path, err)
+		t.Fatalf("expected item %s to exist, got %v", path, err)
 	}
 }
 
-func TestCreateFolder(t *testing.T) {
+func newTestClient(t *testing.T) *http.Client {
 	client, err := newClient(context.TODO(), "")
 	if err != nil {
-		t.Errorf("failed to create http client %v", err)
-		return
+		t.Fatalf("Could not create http client %v", err)
 	}
+	return client
+}
+
+func TestCreateFolder(t *testing.T) {
+	client := newTestClient(t)
 
 	// assert test preconditions
-	fail := !assertNotExist(t, client, "a")
-	fail = fail || !assertNotExist(t, client, "a/b")
-	if fail {
-		return
-	}
+	assertNotExist(t, client, "a")
+	assertNotExist(t, client, "a/b")
 
 	// cleanup after ourselves
 	defer func() {
@@ -55,8 +53,7 @@ func TestCreateFolder(t *testing.T) {
 	assertCreateFolder := func(path string) {
 		err := onedriveCreateFolder(client, path)
 		if err != nil {
-			t.Errorf("could not create folder %s: %v", path, err)
-			return
+			t.Fatalf("could not create folder %s: %v", path, err)
 		}
 		assertExist(t, client, path)
 	}
@@ -90,40 +87,36 @@ func TestDirectoryNames(t *testing.T) {
 	assertArrayEquals(t, []string{"a", "a/b"}, pathNames("a//b"))
 }
 
-func createTestBackend() (*onedriveBackend, error) {
+func createTestBackend(t *testing.T) *onedriveBackend {
 	prefix := fmt.Sprintf("test-%d", time.Now().UnixNano())
 
 	cfg := NewConfig()
 	cfg.Prefix = prefix
 
-	be, err := open(cfg, true)
+	be, err := open(context.TODO(), cfg, true)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not create backend ")
+		t.Fatalf("could not create test backend %v ", err)
 	}
 
-	return be, nil
+	return be
 }
 
 func TestCreateFolders(t *testing.T) {
-	be, err := createTestBackend()
-	if err != nil {
-		t.Fatal(fmt.Sprintf("could not create test backend %v ", err))
-		return
-	}
+	be := createTestBackend(t)
+	defer be.Delete(context.TODO())
 
-	err = be.createFolders("data/aa")
+	err := be.createFolders("data/aa")
 	if err != nil {
-		t.Errorf("could not create backend %v", err)
-		return
+		t.Fatalf("could not create backend %v", err)
 	}
 }
 
-func createTestFile(prefix string, size int64) (*os.File, error) {
+func createTestFile(t *testing.T, prefix string, size int64) *os.File {
 	// TODO is there an existing test helper?
 
 	tmpfile, err := ioutil.TempFile("", prefix)
 	if err != nil {
-		return nil, err
+		t.Fatalf("could not create temp file %v", err)
 	}
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	buf := bufio.NewWriter(tmpfile)
@@ -132,7 +125,7 @@ func createTestFile(prefix string, size int64) (*os.File, error) {
 	}
 	buf.Flush()
 	tmpfile.Seek(0, os.SEEK_SET)
-	return tmpfile, nil
+	return tmpfile
 }
 
 func skipSlowTest(t *testing.T) {
@@ -143,26 +136,23 @@ func skipSlowTest(t *testing.T) {
 
 func assertUpload(t *testing.T, be restic.Backend, size int64) {
 	fmt.Printf("testing file size=%d...", size) // TODO how do I flush stdout here?
-	tmpfile, err := createTestFile(fmt.Sprintf("tmpfile-%d", size), size)
-	if err != nil {
-		t.Errorf("Failed %v", err)
-	}
+	tmpfile := createTestFile(t, fmt.Sprintf("tmpfile-%d", size), size)
 	defer func() { tmpfile.Close(); os.Remove(tmpfile.Name()) }()
 
 	ctx := context.Background()
 
 	f := restic.Handle{Type: restic.DataFile, Name: tmpfile.Name()}
-	err = be.Save(ctx, f, tmpfile)
+	err := be.Save(ctx, f, tmpfile)
 	if err != nil {
-		t.Errorf("Save failed %v", err)
+		t.Fatalf("Save failed %v", err)
 	}
 
 	if fileInfo, err := be.Stat(ctx, f); err != nil || size != fileInfo.Size {
 		fmt.Printf("FAILED\n")
 		if err != nil {
-			t.Errorf("Stat failed %v", err)
+			t.Fatalf("Stat failed %v", err)
 		} else {
-			t.Errorf("Wrong file size, expect %d but got %d", size, fileInfo.Size)
+			t.Fatalf("Wrong file size, expect %d but got %d", size, fileInfo.Size)
 		}
 	} else {
 		fmt.Printf("SUCCESS\n")
@@ -173,10 +163,7 @@ func TestLargeFileUpload(t *testing.T) {
 	skipSlowTest(t)
 
 	ctx := context.TODO()
-	be, err := createTestBackend()
-	if err != nil {
-		t.Errorf("Failed %v", err)
-	}
+	be := createTestBackend(t)
 	defer be.Delete(ctx)
 
 	assertUpload(t, be, largeUploadFragmentSize-1)
@@ -192,28 +179,21 @@ func TestLargeFileImmutableUpload(t *testing.T) {
 	skipSlowTest(t)
 
 	ctx := context.TODO()
-	be, err := createTestBackend()
-	if err != nil {
-		t.Errorf("Failed %v", err)
-	}
+	be := createTestBackend(t)
 	defer be.Delete(ctx)
 
-	tmpfile, err := createTestFile("10M", 10*1024*1024)
-	if err != nil {
-		t.Errorf("Failed %v", err)
-	}
+	tmpfile := createTestFile(t, "10M", 10*1024*1024)
 	defer func() { tmpfile.Close(); os.Remove(tmpfile.Name()) }()
 
 	f := restic.Handle{Type: restic.DataFile, Name: "10M"}
-	err = be.Save(ctx, f, tmpfile)
+	err := be.Save(ctx, f, tmpfile)
 	if err != nil {
-		t.Errorf("Failed %v", err)
+		t.Fatalf("Failed %v", err)
 	}
 	tmpfile.Seek(0, os.SEEK_SET)
 	err = be.Save(ctx, f, tmpfile)
-	// TODO assert http status code 412 precondition failed
-	if err == nil {
-		t.Errorf("Upload existing file didn't fail")
+	if herr, ok := err.(httpError); !ok || herr.statusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected upload to failed with 412/StatusPreconditionFailed, got %v", err)
 	}
 }
 
@@ -221,19 +201,15 @@ func TestListPaging(t *testing.T) {
 	skipSlowTest(t)
 
 	ctx := context.TODO()
-	be, err := createTestBackend()
-	if err != nil {
-		t.Errorf("Failed %v", err)
-	}
+	be := createTestBackend(t)
 	defer be.Delete(ctx)
 
 	const count = 432
 	for i := 0; i < count; i++ {
 		f := restic.Handle{Type: restic.DataFile, Name: fmt.Sprintf("temp-%d", i)}
-		err = be.Save(ctx, f, strings.NewReader(fmt.Sprintf("temp-%d", i)))
+		err := be.Save(ctx, f, strings.NewReader(fmt.Sprintf("temp-%d", i)))
 		if err != nil {
-			t.Errorf("Failed %v", err)
-			return
+			t.Fatalf("Failed %v", err)
 		}
 	}
 
@@ -247,6 +223,6 @@ func TestListPaging(t *testing.T) {
 		actual++
 	}
 	if count != actual {
-		t.Errorf("Wrong item count, expected %d got %d", count, actual)
+		t.Fatalf("Wrong item count, expected %d got %d", count, actual)
 	}
 }

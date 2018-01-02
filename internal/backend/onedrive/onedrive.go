@@ -1,7 +1,8 @@
 package onedrive
 
 // TODO logging
-// TODO context cancel
+// TODO consider sync.Once for createFolders
+// TODO context cancel and cleanup of partially uploaded files
 // TODO test-specific secrets file location
 // TODO make small/large/chunked upload threasholds configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
@@ -373,6 +374,10 @@ func onedriveItemContent(client *http.Client, path string, length int, offset in
 	if err != nil {
 		return nil, err
 	}
+	// note that observed behaviour does not match documentation
+	// the docs claim GET item content always return 302/Found redirect response
+	// observed (both in golang and postman), 200 or 206 responses
+	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_get_content
 	if length > 0 || offset > 0 {
 		byteRange := fmt.Sprintf("bytes=%d-", offset)
 		if length > 0 {
