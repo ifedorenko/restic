@@ -1,11 +1,11 @@
 package onedrive
 
 // TODO logging
-// TODO consider sync.Once for createFolders
 // TODO context cancel and cleanup of partially uploaded files
 // TODO test-specific secrets file location
 // TODO make small/large/chunked upload threasholds configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
+//      or empty recycle bin as part of delete
 
 import (
 	"context"
@@ -147,7 +147,7 @@ func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
 	if err != nil {
 		return item, err
 	}
-	defer resp.Body.Close()
+	defer drainAndCloseBody(resp.Body)
 	if !isHTTPSuccess(resp.StatusCode) {
 		return item, newHTTPError(resp.Status, resp.StatusCode)
 	}
@@ -170,7 +170,7 @@ OUTER:
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer drainAndCloseBody(resp.Body)
 		if !isHTTPSuccess(resp.StatusCode) {
 			return newHTTPError(resp.Status, resp.StatusCode)
 		}
@@ -409,8 +409,8 @@ type onedriveBackend struct {
 	// used to limit number of concurrent remote requests
 	sem *backend.Semaphore
 
-	// see createParentFolders
-	folders     map[string]interface{}
+	// see createFolders
+	folders     map[string]*sync.Once
 	foldersLock sync.Mutex
 
 	backend.Layout
@@ -503,7 +503,7 @@ func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, er
 		Layout:  layout,
 		basedir: cfg.Prefix,
 		client:  client,
-		folders: make(map[string]interface{}),
+		folders: make(map[string]*sync.Once),
 		sem:     sem,
 	}
 
@@ -569,63 +569,35 @@ func (be *onedriveBackend) Close() error {
 // creates specified folder and any missing parent folders
 func (be *onedriveBackend) createFolders(folderPath string) error {
 	// this is likely overkill, but I wanted to implement the following behaviour:
-	// * folders known to exist in are skipped without remote request
-	//   (the assumption being, local sync is "free" in comparison to remote requests)
+	// * folders known to exist are skipped without remote requests
 	// * folders that are not known to exist are guaranteed to be created only once
-	//   (including the case when multiple threads attempt to create the same folder)
+	//   (even when multiple threads create the same folder concurrently)
 	// * different threads can concurrently create different folders
-	//
-	// onedriveBackend.folders map keeps track of all folders knowns to exist.
-	// access to the map is guarded by onedriveBackend.foldersLock mutex.
-	// the map key is the folder path string, the map value is one of the following
-	// * nil means the folder is not known to exist. first thread to create the folder
-	//   will assign the value to sync.Mutex
-	// * sync.Mutex means the folder needs to be created or is being created on another thread
-	//   a thread that got (or created) folder mutex does the following
-	//   - lock the folder mutex
-	//   - double-check in #foldersLock that the folder has not been created by another thread
-	//   - craete the folder
-	//   - set folder's map value to true
-	// * true (or any other value) means the folder is known to exist
-	//
-	// (really not comfortable with this. somebody please review or, better yet, tell me
-	// there is much easier solution and/or existing golang library I can use)
 
-	folderLock := func(path string) interface{} {
+	// returns per-folde sync.Once
+	// uses sync.Mutex to serialize concurrent access
+	folderOnce := func(path string) *sync.Once {
 		be.foldersLock.Lock()
 		defer be.foldersLock.Unlock()
 
-		lock := be.folders[path]
-		if lock == nil {
-			lock = sync.Mutex{}
-			be.folders[path] = lock
+		once := be.folders[path]
+		if once == nil {
+			once = &sync.Once{}
+			be.folders[path] = once
 		}
 
-		return lock
+		return once
 	}
 
-	disableFolderLock := func(path string) {
-		be.foldersLock.Lock()
-		defer be.foldersLock.Unlock()
-		be.folders[path] = true
-	}
-
+	// creates the folder, if the folder is not known to exist
+	// uses sync.Once to implement only-once behaviour
 	ifCreateFolder := func(path string) error {
-		lock := folderLock(path)
-		if mutex, ok := lock.(sync.Mutex); ok {
-			mutex.Lock()
-			defer mutex.Unlock()
-
-			// another thread could have created the folder while we waited on the mutex
-			if _, ok = folderLock(path).(sync.Mutex); ok {
-				err := onedriveCreateFolder(be.client, path)
-				if err != nil {
-					return err
-				}
-				disableFolderLock(path)
-			}
-		}
-		return nil
+		once := folderOnce(path)
+		var err error
+		once.Do(func() {
+			err = onedriveCreateFolder(be.client, path)
+		})
+		return err
 	}
 
 	for _, path := range pathNames(folderPath) {

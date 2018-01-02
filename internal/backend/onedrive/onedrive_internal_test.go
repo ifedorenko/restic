@@ -105,9 +105,9 @@ func TestCreateFolders(t *testing.T) {
 	be := createTestBackend(t)
 	defer be.Delete(context.TODO())
 
-	err := be.createFolders("data/aa")
+	err := be.createFolders(be.basedir + "/data/aa")
 	if err != nil {
-		t.Fatalf("could not create backend %v", err)
+		t.Fatalf("failed to create folders: %v", err)
 	}
 }
 
