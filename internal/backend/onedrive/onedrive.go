@@ -276,7 +276,7 @@ func readerSize(rd io.Reader) (int64, error) {
 }
 
 // fails if overwriteIfExists==false and the item exists
-func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
+func onedriveItemUpload(client *http.Client, nakedClient *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
 	length, err := readerSize(rd)
 	if err != nil {
 		return err
@@ -333,9 +333,14 @@ func onedriveItemUpload(client *http.Client, path string, rd io.Reader, overwrit
 			return err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
-		req.Header.Add("Content-Length", fmt.Sprintf("%d", contentLength))
+		// req.Header.Add("Content-Length", fmt.Sprintf("%d", contentLength))
 		req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pos, pos+contentLength-1, length))
-		resp, err := client.Do(req)
+
+		// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession#remarks
+		// Including the Authorization header when issuing the PUT call may result in a HTTP 401 Unauthorized response.
+		// The Authorization header and bearer token should only be sent when issuing the POST during the first step.
+		// It should be not be included when issueing the PUT.
+		resp, err := nakedClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -388,6 +393,10 @@ func onedriveItemContent(client *http.Client, path string, length int, offset in
 type onedriveBackend struct {
 	basedir string
 
+	// underlying http.Client
+	nakedClient *http.Client
+
+	// oauth2-enabled http.Client wrapper
 	client *http.Client
 
 	// used to limit number of concurrent remote requests
@@ -453,13 +462,13 @@ func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error
 }
 
 func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, error) {
-	hc := &http.Client{
+	nakedClient := &http.Client{
 		Transport: &http.Transport{
 			// http connection pool size=2 by default
 			MaxIdleConnsPerHost: int(cfg.Connections),
 		},
 	}
-	ctx = ncontext.WithValue(ctx, oauth2.HTTPClient, hc)
+	ctx = ncontext.WithValue(ctx, oauth2.HTTPClient, nakedClient)
 	client, err := newClient(ctx, cfg.SecretsFilePath)
 	if err != nil {
 		return nil, err
@@ -484,11 +493,12 @@ func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, er
 	}
 
 	be := &onedriveBackend{
-		Layout:  layout,
-		basedir: cfg.Prefix,
-		client:  client,
-		folders: make(map[string]*sync.Once),
-		sem:     sem,
+		Layout:      layout,
+		basedir:     cfg.Prefix,
+		nakedClient: nakedClient,
+		client:      client,
+		folders:     make(map[string]*sync.Once),
+		sem:         sem,
 	}
 
 	if createNew {
@@ -605,7 +615,7 @@ func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Read
 		return err
 	}
 
-	return onedriveItemUpload(be.client, be.Filename(f), rd, f.Type == restic.ConfigFile)
+	return onedriveItemUpload(be.client, be.nakedClient, be.Filename(f), rd, f.Type == restic.ConfigFile)
 }
 
 // Load returns a reader that yields the contents of the file at h at the
