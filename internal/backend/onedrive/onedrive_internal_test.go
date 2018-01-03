@@ -2,6 +2,7 @@ package onedrive
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -225,4 +226,42 @@ func TestListPaging(t *testing.T) {
 	if count != actual {
 		t.Fatalf("Wrong item count, expected %d got %d", count, actual)
 	}
+}
+
+func disabledTestIntermitentInvalidFragmentLength(t *testing.T) {
+	// 2018-01-02 observed intermitent failures during PUT
+	// response status 400 Bad Request
+	// response body {"error":{"code":"invalidRequest","message":"Declared fragment length does not match the provided number of bytes"}}
+	// assume server-side issues as most of the requests did succeed
+
+	ctx := context.TODO()
+	be := createTestBackend(t)
+	defer be.Delete(ctx)
+
+	items := make(chan int)
+
+	upload := func() {
+		for {
+			i, ok := <-items
+			if !ok {
+				break
+			}
+			data := []byte(fmt.Sprintf("random test blob %v", i))
+			id := restic.Hash(data)
+			h := restic.Handle{Type: restic.DataFile, Name: id.String()}
+			err := be.Save(ctx, h, bytes.NewReader(data))
+			if err != nil {
+				t.Error(err)
+			}
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		go upload()
+	}
+
+	for i := 0; i < 2000; i++ {
+		items <- i
+	}
+	close(items)
 }
