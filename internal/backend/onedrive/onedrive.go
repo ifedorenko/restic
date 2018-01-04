@@ -1,7 +1,6 @@
 package onedrive
 
 // TODO logging and error stack traces
-// TODO context cancel, may help with hang recovery
 // TODO double-// in POST path, not pretty
 //      https://graph.microsoft.com/v1.0/me/drive/root://Backups/restic/data...
 // TODO http request timeout if no new bytes in N time units (like in okhttp)
@@ -140,7 +139,7 @@ type driveItemChildren struct {
 	Children []driveItem `json:"value"`
 }
 
-func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
+func onedriveItemInfo(ctx context.Context, client *http.Client, path string) (driveItem, error) {
 	var item driveItem
 
 	req, err := http.NewRequest("GET", onedriveBaseURL+":/"+path, nil)
@@ -162,7 +161,7 @@ func onedriveItemInfo(client *http.Client, path string) (driveItem, error) {
 	return item, nil
 }
 
-func onedriveItemChildren(client *http.Client, path string, consumer func(driveItem) bool) error {
+func onedriveItemChildren(ctx context.Context, client *http.Client, path string, consumer func(driveItem) bool) error {
 	url := onedriveBaseURL + ":/" + path + ":/children?select=name"
 OUTER:
 	for url != "" {
@@ -193,7 +192,7 @@ OUTER:
 	return nil
 }
 
-func onedriveItemDelete(client *http.Client, path string) error {
+func onedriveItemDelete(ctx context.Context, client *http.Client, path string) error {
 	req, err := http.NewRequest("DELETE", onedriveBaseURL+":/"+path, nil)
 	if err != nil {
 		return err
@@ -214,7 +213,7 @@ func onedriveItemDelete(client *http.Client, path string) error {
 }
 
 // creates folder if it does not already exist
-func onedriveCreateFolder(client *http.Client, path string) error {
+func onedriveCreateFolder(ctx context.Context, client *http.Client, path string) error {
 	var url, name string
 	nameIdx := strings.LastIndex(path, "/")
 	if nameIdx < 0 {
@@ -279,7 +278,7 @@ func readerSize(rd io.Reader) (int64, error) {
 }
 
 // fails if overwriteIfExists==false and the item exists
-func onedriveItemUpload(client *http.Client, nakedClient *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
+func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
 	length, err := readerSize(rd)
 	if err != nil {
 		return err
@@ -361,7 +360,7 @@ func onedriveItemUpload(client *http.Client, nakedClient *http.Client, path stri
 	return nil
 }
 
-func onedriveItemContent(client *http.Client, path string, length int, offset int64) (io.ReadCloser, error) {
+func onedriveItemContent(ctx context.Context, client *http.Client, path string, length int, offset int64) (io.ReadCloser, error) {
 	req, err := http.NewRequest("GET", onedriveBaseURL+":/"+path+":/content", nil)
 	if err != nil {
 		return nil, err
@@ -408,6 +407,9 @@ type onedriveBackend struct {
 	// see createFolders
 	folders     map[string]*sync.Once
 	foldersLock sync.Mutex
+
+	// request timeout
+	timeout time.Duration
 
 	backend.Layout
 }
@@ -465,9 +467,11 @@ func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error
 }
 
 func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool) (*onedriveBackend, error) {
+	ctx, cancel := timeoutContext(ctx, cfg.Timeout)
+	defer cancel()
+
 	nakedClient := &http.Client{Transport: rt}
-	ctx = ncontext.WithValue(ctx, oauth2.HTTPClient, nakedClient)
-	client, err := newClient(ctx, cfg.SecretsFilePath)
+	client, err := newClient(ncontext.WithValue(ctx, oauth2.HTTPClient, nakedClient), cfg.SecretsFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +480,7 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 
 	configFile := restic.Handle{Type: restic.ConfigFile}
 
-	_, err = onedriveItemInfo(client, layout.Filename(configFile))
+	_, err = onedriveItemInfo(ctx, client, layout.Filename(configFile))
 	if err != nil && !isNotExist(err) {
 		return nil, err // could not query remote
 	}
@@ -497,10 +501,11 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 		client:      client,
 		folders:     make(map[string]*sync.Once),
 		sem:         sem,
+		timeout:     cfg.Timeout,
 	}
 
 	if createNew {
-		err = be.createFolders(cfg.Prefix)
+		err = be.createFolders(ctx, cfg.Prefix)
 		if err != nil {
 			return nil, err
 		}
@@ -512,6 +517,11 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 //
 //
 //
+
+func timeoutContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	// TODO this really belongs to RetryBackend
+	return context.WithTimeout(ctx, timeout)
+}
 
 // Open opens the onedrive backend.
 func Open(ctx context.Context, cfg Config, rt http.RoundTripper) (restic.Backend, error) {
@@ -531,10 +541,13 @@ func (be *onedriveBackend) Location() string {
 
 // Test a boolean value whether a File with the name and type exists.
 func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, error) {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	_, err := onedriveItemInfo(be.client, be.Filename(f))
+	_, err := onedriveItemInfo(ctx, be.client, be.Filename(f))
 	if err != nil {
 		if isNotExist(err) {
 			return false, nil
@@ -547,10 +560,13 @@ func (be *onedriveBackend) Test(ctx context.Context, f restic.Handle) (bool, err
 
 // Remove removes a File described  by h.
 func (be *onedriveBackend) Remove(ctx context.Context, f restic.Handle) error {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	return onedriveItemDelete(be.client, be.Filename(f))
+	return onedriveItemDelete(ctx, be.client, be.Filename(f))
 }
 
 // Close the backend
@@ -559,7 +575,7 @@ func (be *onedriveBackend) Close() error {
 }
 
 // creates specified folder and any missing parent folders
-func (be *onedriveBackend) createFolders(folderPath string) error {
+func (be *onedriveBackend) createFolders(ctx context.Context, folderPath string) error {
 	// this is likely overkill, but I wanted to implement the following behaviour:
 	// * folders known to exist are skipped without remote requests
 	// * folders that are not known to exist are guaranteed to be created only once
@@ -587,7 +603,7 @@ func (be *onedriveBackend) createFolders(folderPath string) error {
 		once := folderOnce(path)
 		var err error
 		once.Do(func() {
-			err = onedriveCreateFolder(be.client, path)
+			err = onedriveCreateFolder(ctx, be.client, path)
 		})
 		return err
 	}
@@ -604,16 +620,19 @@ func (be *onedriveBackend) createFolders(folderPath string) error {
 
 // Save stores the data in the backend under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
 	// precreate parent directories to avoid intermittent "412/Precondition failed" errors
-	err := be.createFolders(be.Dirname(f))
+	err := be.createFolders(ctx, be.Dirname(f))
 	if err != nil {
 		return err
 	}
 
-	return onedriveItemUpload(be.client, be.nakedClient, be.Filename(f), rd, f.Type == restic.ConfigFile)
+	return onedriveItemUpload(ctx, be.client, be.nakedClient, be.Filename(f), rd, f.Type == restic.ConfigFile)
 }
 
 // Load returns a reader that yields the contents of the file at h at the
@@ -632,23 +651,30 @@ func (be *onedriveBackend) Load(ctx context.Context, f restic.Handle, length int
 		return nil, errors.Errorf("invalid length %d", length)
 	}
 
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 
-	rd, err := onedriveItemContent(be.client, be.Filename(f), length, offset)
+	rd, err := onedriveItemContent(ctx, be.client, be.Filename(f), length, offset)
 	if err != nil {
 		be.sem.ReleaseToken()
+		cancel()
 		return nil, err
 	}
 
-	return be.sem.ReleaseTokenOnClose(rd, nil), nil
+	return be.sem.ReleaseTokenOnClose(rd, cancel), nil
 }
 
 // Stat returns information about the File identified by h.
 func (be *onedriveBackend) Stat(ctx context.Context, f restic.Handle) (restic.FileInfo, error) {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	item, err := onedriveItemInfo(be.client, be.Filename(f))
+	item, err := onedriveItemInfo(ctx, be.client, be.Filename(f))
 	if err != nil {
 		return restic.FileInfo{}, err
 	}
@@ -659,6 +685,7 @@ func (be *onedriveBackend) Stat(ctx context.Context, f restic.Handle) (restic.Fi
 // arbitrary order. A goroutine is started for this, which is stopped when
 // ctx is cancelled.
 func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan string {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
 	ch := make(chan string)
 
 	resultForwarder := func(item driveItem) bool {
@@ -674,10 +701,11 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 		be.sem.GetToken()
 		defer be.sem.ReleaseToken()
 
-		return onedriveItemChildren(be.client, path, consumer)
+		return onedriveItemChildren(ctx, be.client, path, consumer)
 	}
 
 	go func() {
+		defer cancel()
 		defer close(ch)
 
 		prefix, hasSubdirs := be.Basedir(t)
@@ -704,7 +732,6 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 	}()
 
 	return ch
-
 }
 
 // IsNotExist returns true if the error was caused by a non-existing file
@@ -715,10 +742,13 @@ func (be *onedriveBackend) IsNotExist(err error) bool {
 
 // Delete removes all data in the backend.
 func (be *onedriveBackend) Delete(ctx context.Context) error {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
+
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	err := onedriveItemDelete(be.client, be.basedir)
+	err := onedriveItemDelete(ctx, be.client, be.basedir)
 	if err != nil && !isNotExist(err) {
 		return err
 	}

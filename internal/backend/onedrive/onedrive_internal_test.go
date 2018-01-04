@@ -18,14 +18,14 @@ import (
 )
 
 func assertNotExist(t *testing.T, client *http.Client, path string) {
-	_, err := onedriveItemInfo(client, path)
+	_, err := onedriveItemInfo(context.TODO(), client, path)
 	if !isNotExist(err) {
 		t.Fatalf("expected item %s to not exist, got %v", path, err)
 	}
 }
 
 func assertExist(t *testing.T, client *http.Client, path string) {
-	_, err := onedriveItemInfo(client, path)
+	_, err := onedriveItemInfo(context.TODO(), client, path)
 	if err != nil {
 		t.Fatalf("expected item %s to exist, got %v", path, err)
 	}
@@ -48,11 +48,11 @@ func TestCreateFolder(t *testing.T) {
 
 	// cleanup after ourselves
 	defer func() {
-		onedriveItemDelete(client, "a")
+		onedriveItemDelete(context.TODO(), client, "a")
 	}()
 
 	assertCreateFolder := func(path string) {
-		err := onedriveCreateFolder(client, path)
+		err := onedriveCreateFolder(context.TODO(), client, path)
 		if err != nil {
 			t.Fatalf("could not create folder %s: %v", path, err)
 		}
@@ -106,7 +106,7 @@ func TestCreateFolders(t *testing.T) {
 	be := createTestBackend(t)
 	defer be.Delete(context.TODO())
 
-	err := be.createFolders(be.basedir + "/data/aa")
+	err := be.createFolders(context.TODO(), be.basedir+"/data/aa")
 	if err != nil {
 		t.Fatalf("failed to create folders: %v", err)
 	}
