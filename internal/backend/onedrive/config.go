@@ -2,6 +2,7 @@ package onedrive
 
 import (
 	"strings"
+	"time"
 
 	"github.com/restic/restic/internal/errors"
 	"github.com/restic/restic/internal/options"
@@ -13,13 +14,21 @@ type Config struct {
 
 	Prefix string
 
-	Connections uint `option:"connections" help:"set a limit for the number of concurrent connections (default: 5)"`
+	Connections uint          `option:"connections" help:"set a limit for the number of concurrent connections (default: 5)"`
+	Timeout     time.Duration `option:"timeout" help:"set remote request timeout (default: 5 minutes)"`
 }
 
 // NewConfig returns a new Config with the default values filled in.
 func NewConfig() Config {
 	return Config{
 		Connections: 5,
+
+		// Back-of-the-envelope calculation
+		// with 10MB data file, 1MB/s connection and 5 concurrent connections
+		// individual files should take ~50 seconds to transfer
+		// 5 minutes should be more than enough to finish any operation
+		// note that RetryBackend ExponentialBackOff.MaxElapsedTime is 15 minutes
+		Timeout: 5 * time.Minute,
 	}
 }
 
