@@ -94,7 +94,7 @@ func createTestBackend(t *testing.T) *onedriveBackend {
 	cfg := NewConfig()
 	cfg.Prefix = prefix
 
-	be, err := open(context.TODO(), cfg, true)
+	be, err := open(context.TODO(), cfg, http.DefaultTransport, true)
 	if err != nil {
 		t.Fatalf("could not create test backend %v ", err)
 	}

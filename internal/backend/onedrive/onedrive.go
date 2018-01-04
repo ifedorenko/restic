@@ -1,7 +1,10 @@
 package onedrive
 
-// TODO logging
-// TODO context cancel
+// TODO logging and error stack traces
+// TODO context cancel, may help with hang recovery
+// TODO double-// in POST path, not pretty
+//      https://graph.microsoft.com/v1.0/me/drive/root://Backups/restic/data...
+// TODO http request timeout if no new bytes in N time units (like in okhttp)
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
@@ -461,13 +464,8 @@ func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error
 	return conf.Client(ctx, token), nil
 }
 
-func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, error) {
-	nakedClient := &http.Client{
-		Transport: &http.Transport{
-			// http connection pool size=2 by default
-			MaxIdleConnsPerHost: int(cfg.Connections),
-		},
-	}
+func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool) (*onedriveBackend, error) {
+	nakedClient := &http.Client{Transport: rt}
 	ctx = ncontext.WithValue(ctx, oauth2.HTTPClient, nakedClient)
 	client, err := newClient(ctx, cfg.SecretsFilePath)
 	if err != nil {
@@ -517,12 +515,12 @@ func open(ctx context.Context, cfg Config, createNew bool) (*onedriveBackend, er
 
 // Open opens the onedrive backend.
 func Open(ctx context.Context, cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	return open(ctx, cfg, false)
+	return open(ctx, cfg, rt, false)
 }
 
 // Create creates and opens the onedrive backend.
 func Create(ctx context.Context, cfg Config, rt http.RoundTripper) (restic.Backend, error) {
-	return open(ctx, cfg, true)
+	return open(ctx, cfg, rt, true)
 }
 
 // Location returns a string that describes the type and location of the
