@@ -32,7 +32,7 @@ func assertExist(t *testing.T, client *http.Client, path string) {
 }
 
 func newTestClient(t *testing.T) *http.Client {
-	client, err := newClient(context.TODO(), "")
+	client, err := newClient(http.DefaultClient, "")
 	if err != nil {
 		t.Fatalf("Could not create http client %v", err)
 	}

@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	ncontext "golang.org/x/net/context"
 	"golang.org/x/oauth2"
 
 	"github.com/restic/restic/internal/backend"
@@ -427,7 +426,7 @@ type secretsFile struct {
 	} `json:"Token"`
 }
 
-func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error) {
+func newClient(client *http.Client, secretsFilePath string) (*http.Client, error) {
 	if secretsFilePath == "" {
 		me, err := user.Current()
 		if err != nil {
@@ -463,7 +462,7 @@ func newClient(ctx context.Context, secretsFilePath string) (*http.Client, error
 		Expiry:       secrets.Token.Expiry,
 	}
 
-	return conf.Client(ctx, token), nil
+	return conf.Client(context.WithValue(context.Background(), oauth2.HTTPClient, client), token), nil
 }
 
 func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool) (*onedriveBackend, error) {
@@ -471,7 +470,7 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 	defer cancel()
 
 	nakedClient := &http.Client{Transport: rt}
-	client, err := newClient(ncontext.WithValue(ctx, oauth2.HTTPClient, nakedClient), cfg.SecretsFilePath)
+	client, err := newClient(nakedClient, cfg.SecretsFilePath)
 	if err != nil {
 		return nil, err
 	}
