@@ -1,9 +1,6 @@
 package onedrive
 
 // TODO logging and error stack traces
-// TODO double-// in POST path, not pretty
-//      https://graph.microsoft.com/v1.0/me/drive/root://Backups/restic/data...
-// TODO http request timeout if no new bytes in N time units (like in okhttp)
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
