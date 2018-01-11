@@ -401,7 +401,8 @@ type onedriveBackend struct {
 	client *http.Client
 
 	// used to limit number of concurrent remote requests
-	sem *backend.Semaphore
+	sem         *backend.Semaphore
+	connections uint
 
 	// see createFolders
 	folders     map[string]*sync.Once
@@ -500,6 +501,7 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 		client:      client,
 		folders:     make(map[string]*sync.Once),
 		sem:         sem,
+		connections: cfg.Connections,
 		timeout:     cfg.Timeout,
 	}
 
@@ -696,11 +698,15 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 		}
 	}
 
-	listChildren := func(path string, consumer func(driveItem) bool) error {
+	listChildren := func(path string, consumer func(driveItem) bool) {
 		be.sem.GetToken()
 		defer be.sem.ReleaseToken()
 
-		return onedriveItemChildren(ctx, be.client, path, consumer)
+		err := onedriveItemChildren(ctx, be.client, path, consumer)
+		if err != nil {
+			// TODO: return err to caller once err handling in List() is improved
+			// debug.Log("List: %v", err)
+		}
 	}
 
 	go func() {
@@ -709,24 +715,29 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 
 		prefix, hasSubdirs := be.Basedir(t)
 
-		var err error
 		if !hasSubdirs {
-			err = listChildren(prefix, resultForwarder)
+			listChildren(prefix, resultForwarder)
 		} else {
 			subdirs := map[string]bool{}
-			err = listChildren(prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
-			if err == nil {
-				for subdir := range subdirs {
-					err = listChildren(prefix+"/"+subdir, resultForwarder)
-					if err != nil {
-						break
+			listChildren(prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
+
+			// list subfolders on separate threads
+			subch := make(chan string)
+			wg := sync.WaitGroup{}
+			for i := uint(0); i < be.connections; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for subdir := range subch {
+						listChildren(prefix+"/"+subdir, resultForwarder)
 					}
-				}
+				}()
 			}
-		}
-		if err != nil {
-			// TODO: return err to caller once err handling in List() is improved
-			// debug.Log("List: %v", err)
+			for subdir := range subdirs {
+				subch <- subdir
+			}
+			close(subch)
+			wg.Wait()
 		}
 	}()
 
