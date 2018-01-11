@@ -39,7 +39,7 @@ func init() {
 func ParseConfig(s string) (interface{}, error) {
 	data := strings.SplitN(s, ":", 2)
 	if len(data) != 2 {
-		return nil, errors.New("invalid URL, expected: onedrive:/prefix")
+		return nil, errors.New("invalid URL, expected: onedrive:prefix")
 	}
 
 	scheme, prefix := data[0], data[1]
