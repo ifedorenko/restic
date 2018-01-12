@@ -33,24 +33,24 @@ import (
 //
 
 type httpError struct {
-	status     string
+	statusText string
 	statusCode int
 }
 
 func (e httpError) Error() string {
-	return e.status
-}
-
-func (e httpError) String() string {
-	return e.status
+	statusText := e.statusText
+	if statusText == "" {
+		statusText = http.StatusText(e.statusCode)
+	}
+	return fmt.Sprintf("%d/%s", e.statusCode, statusText)
 }
 
 func isHTTPSuccess(statusCode int) bool {
 	return statusCode >= 200 && statusCode <= 299
 }
 
-func newHTTPError(status string, statusCode int) httpError {
-	return httpError{statusCode: statusCode}
+func newHTTPError(statusText string, statusCode int) httpError {
+	return httpError{statusText: statusText, statusCode: statusCode}
 }
 
 func isNotExist(err error) bool {
