@@ -1,5 +1,6 @@
 package onedrive
 
+// TODO Request.withContext
 // TODO logging and error stack traces
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
@@ -335,6 +336,17 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 		resp, err := nakedClient.Do(req)
 		if err != nil {
 			return err
+		}
+		if resp.StatusCode == 400 {
+			// this occasionally happens when running tests for no reason I can tell
+			// message is "Declared fragment length does not match the provided number of bytes"
+			// the debug output is meant to help understand the pattern (if there is one)
+			buf, err := ioutil.ReadAll(resp.Body)
+			body := ""
+			if buf != nil {
+				body = string(buf)
+			}
+			fmt.Printf("onedrive item PUT %s (size=%d offset=%d len=%d): err=%v body=%s\n", path, length, pos, contentLength, err, string(body))
 		}
 		drainAndCloseBody(resp.Body)
 		if !isHTTPSuccess(resp.StatusCode) {
