@@ -1,6 +1,5 @@
 package onedrive
 
-// TODO Request.withContext
 // TODO logging and error stack traces
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
@@ -143,7 +142,7 @@ func onedriveItemInfo(ctx context.Context, client *http.Client, path string) (dr
 	if err != nil {
 		return item, err
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return item, err
 	}
@@ -163,7 +162,7 @@ func onedriveGetChildren(ctx context.Context, client *http.Client, url string) (
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, "", err
 	}
@@ -188,7 +187,7 @@ func onedriveItemDelete(ctx context.Context, client *http.Client, path string) e
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -223,7 +222,7 @@ func onedriveCreateFolder(ctx context.Context, client *http.Client, path string)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("If-None-Match", "*")
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -294,7 +293,7 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 		if !overwriteIfExists {
 			req.Header.Set("If-None-Match", "*")
 		}
-		resp, err := client.Do(req)
+		resp, err := client.Do(req.WithContext(ctx))
 		if err != nil {
 			return "", err
 		}
@@ -333,7 +332,7 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 		// Including the Authorization header when issuing the PUT call may result in a HTTP 401 Unauthorized response.
 		// The Authorization header and bearer token should only be sent when issuing the POST during the first step.
 		// It should be not be included when issueing the PUT.
-		resp, err := nakedClient.Do(req)
+		resp, err := nakedClient.Do(req.WithContext(ctx))
 		if err != nil {
 			return err
 		}
@@ -378,7 +377,7 @@ func onedriveItemContent(ctx context.Context, client *http.Client, path string, 
 		}
 		req.Header.Add("Range", byteRange)
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +655,6 @@ func (be *onedriveBackend) Load(ctx context.Context, f restic.Handle, length int
 	}
 
 	ctx, cancel := timeoutContext(ctx, be.timeout)
-	defer cancel()
 
 	be.sem.GetToken()
 
