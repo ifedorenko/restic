@@ -157,35 +157,29 @@ func onedriveItemInfo(ctx context.Context, client *http.Client, path string) (dr
 	return item, nil
 }
 
-func onedriveItemChildren(ctx context.Context, client *http.Client, path string, consumer func(driveItem) bool) error {
-	url := onedriveBaseURL + ":/" + path + ":/children?select=name"
-OUTER:
-	for url != "" {
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		defer drainAndCloseBody(resp.Body)
-		if !isHTTPSuccess(resp.StatusCode) {
-			return newHTTPError(resp.Status, resp.StatusCode)
-		}
-
-		var item driveItemChildren
-		if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
-			return err
-		}
-		for _, child := range item.Children {
-			if !consumer(child) {
-				break OUTER
-			}
-		}
-		url = item.NextLink
+func onedriveGetChildren(ctx context.Context, client *http.Client, url string) (children []driveItem, nextLink string, err error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, "", err
 	}
-	return nil
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer drainAndCloseBody(resp.Body)
+	if !isHTTPSuccess(resp.StatusCode) {
+		return nil, "", newHTTPError(resp.Status, resp.StatusCode)
+	}
+
+	var item driveItemChildren
+	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+		return nil, "", err
+	}
+	return item.Children, item.NextLink, nil
+}
+
+func onedriveGetChildrenURL(path string) string {
+	return onedriveBaseURL + ":/" + path + ":/children?select=name"
 }
 
 func onedriveItemDelete(ctx context.Context, client *http.Client, path string) error {
@@ -695,14 +689,35 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 		}
 	}
 
-	listChildren := func(path string, consumer func(driveItem) bool) {
-		be.sem.GetToken()
-		defer be.sem.ReleaseToken()
+	// possible dead lock:
+	// - (each directory contains >40 files, which is true for 500GB repo)
+	// - checker starts 40 workers, initially blocked on List() result channel
+	// - List() starts 5 workers, each acquires a sync token, gets >40 names
+	//   from remote system, then pushes names to the result channel;
+	//   (!) list workers block pushing results while holding tokens.
+	// - all checker workers wake up, get names, attempt to acquire sync tokens
+	// - now all list workers wait to push to the results channel and all
+	//   checker workers wait to acquire sync tokens.
+	// solution: list workers release sync token before pushing results
 
-		err := onedriveItemChildren(ctx, be.client, path, consumer)
-		if err != nil {
-			// TODO: return err to caller once err handling in List() is improved
-			// debug.Log("List: %v", err)
+	listChildren := func(path string, consumer func(driveItem) bool) {
+		url := onedriveGetChildrenURL(path)
+		for url != "" {
+			var children []driveItem
+			var err error
+			be.sem.GetToken()
+			children, url, err = onedriveGetChildren(ctx, be.client, url)
+			be.sem.ReleaseToken()
+			if err != nil {
+				// TODO: return err to the caller once err handling in List() is improved
+				fmt.Fprintf(os.Stderr, "List(%v): %v\n", t, err)
+				return
+			}
+			for _, child := range children {
+				if !consumer(child) {
+					return
+				}
+			}
 		}
 	}
 
@@ -715,13 +730,16 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 		if !hasSubdirs {
 			listChildren(prefix, resultForwarder)
 		} else {
+			// list subdirectories concurrently, improves restic-check by ~2 minutes for 500GB repo
+
+			// collect all subdirs first
 			subdirs := map[string]bool{}
 			listChildren(prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
 
-			// list subfolders on separate threads
+			// for workers to list individual subdirs
 			subch := make(chan string)
 			wg := sync.WaitGroup{}
-			for i := uint(0); i < be.connections; i++ {
+			for i := uint(0); i < be.connections-1; i++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -730,10 +748,14 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 					}
 				}()
 			}
+
+			// push subdirs to subdirs channel
 			for subdir := range subdirs {
 				subch <- subdir
 			}
 			close(subch)
+
+			// wait for workers to finish
 			wg.Wait()
 		}
 	}()
