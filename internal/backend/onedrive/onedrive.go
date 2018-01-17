@@ -1,6 +1,7 @@
 package onedrive
 
 // TODO logging and error stack traces
+// TODO use rtests in internal test
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
