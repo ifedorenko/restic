@@ -2,6 +2,8 @@ package onedrive
 
 // TODO logging and error stack traces
 // TODO use rtests in internal test
+// TODO CPU utilization (~70% on Intel N3700) appears too high
+//      investigate what uses the CPU so much
 // TODO test-specific secrets file location
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
@@ -367,10 +369,6 @@ func onedriveItemContent(ctx context.Context, client *http.Client, path string, 
 	if err != nil {
 		return nil, err
 	}
-	// note that observed behaviour does not match documentation
-	// the docs claim GET item content always return 302/Found redirect response
-	// observed (both in golang and postman), 200 or 206 responses
-	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_get_content
 	if length > 0 || offset > 0 {
 		byteRange := fmt.Sprintf("bytes=%d-", offset)
 		if length > 0 {
@@ -378,6 +376,12 @@ func onedriveItemContent(ctx context.Context, client *http.Client, path string, 
 		}
 		req.Header.Add("Range", byteRange)
 	}
+	// disable http compression, it only adds unnecessary CPU overhead for encrypted contents
+	req.Header.Add("Accept-Encoding", "identity")
+	// note that observed behaviour does not match documentation
+	// the docs claim GET item content always return 302/Found redirect response
+	// observed (both in golang and postman), 200 or 206 responses
+	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_get_content
 	resp, err := client.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
