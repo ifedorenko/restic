@@ -182,7 +182,7 @@ func onedriveGetChildren(ctx context.Context, client *http.Client, url string) (
 }
 
 func onedriveGetChildrenURL(path string) string {
-	return onedriveBaseURL + ":/" + path + ":/children?select=name"
+	return onedriveBaseURL + ":/" + path + ":/children?select=name,size"
 }
 
 func onedriveItemDelete(ctx context.Context, client *http.Client, path string) error {
@@ -685,27 +685,12 @@ func (be *onedriveBackend) Stat(ctx context.Context, f restic.Handle) (restic.Fi
 	if err != nil {
 		return restic.FileInfo{}, err
 	}
-	return restic.FileInfo{Size: item.Size}, nil
+	return restic.FileInfo{Name: item.Name, Size: item.Size}, nil
 }
 
-// List returns a channel that yields all names of files of type t in an
-// arbitrary order. A goroutine is started for this, which is stopped when
-// ctx is cancelled.
-func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan string {
-	ctx, cancel := timeoutContext(ctx, be.timeout)
-	ch := make(chan string)
-
-	resultForwarder := func(item driveItem) bool {
-		select {
-		case ch <- item.Name:
-			return true
-		case <-ctx.Done():
-			return false
-		}
-	}
-
+func (be *onedriveBackend) listChildren(ctx context.Context, path string, fn func(driveItem) error) error {
 	// possible dead lock:
-	// - (each directory contains >40 files, which is true for 500GB repo)
+	// - (each data/ subdir contains >40 files, which is true for 500GB repo)
 	// - checker starts 40 workers, initially blocked on List() result channel
 	// - List() starts 5 workers, each acquires a sync token, gets >40 names
 	//   from remote system, then pushes names to the result channel;
@@ -715,67 +700,134 @@ func (be *onedriveBackend) List(ctx context.Context, t restic.FileType) <-chan s
 	//   checker workers wait to acquire sync tokens.
 	// solution: list workers release sync token before pushing results
 
-	listChildren := func(path string, consumer func(driveItem) bool) {
-		url := onedriveGetChildrenURL(path)
-		for url != "" {
-			var children []driveItem
-			var err error
-			be.sem.GetToken()
-			children, url, err = onedriveGetChildren(ctx, be.client, url)
-			be.sem.ReleaseToken()
+	url := onedriveGetChildrenURL(path)
+	for url != "" {
+		var children []driveItem
+		var err error
+		be.sem.GetToken()
+		children, url, err = onedriveGetChildren(ctx, be.client, url)
+		be.sem.ReleaseToken()
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			err = fn(child)
 			if err != nil {
-				// TODO: return err to the caller once err handling in List() is improved
-				fmt.Fprintf(os.Stderr, "List(%v): %v\n", t, err)
-				return
-			}
-			for _, child := range children {
-				if !consumer(child) {
-					return
-				}
+				return err
 			}
 		}
 	}
 
-	go func() {
-		defer cancel()
-		defer close(ch)
+	return nil
+}
 
-		prefix, hasSubdirs := be.Basedir(t)
+// List returns a channel that yields all names of files of type t in an
+// arbitrary order. A goroutine is started for this, which is stopped when
+// ctx is cancelled.
+func (be *onedriveBackend) List(ctx context.Context, t restic.FileType, fn func(restic.FileInfo) error) error {
+	ctx, cancel := timeoutContext(ctx, be.timeout)
+	defer cancel()
 
-		if !hasSubdirs {
-			listChildren(prefix, resultForwarder)
-		} else {
-			// list subdirectories concurrently, improves restic-check by ~2 minutes for 500GB repo
+	prefix, hasSubdirs := be.Basedir(t)
 
-			// collect all subdirs first
-			subdirs := map[string]bool{}
-			listChildren(prefix, func(item driveItem) bool { subdirs[item.Name] = true; return true })
-
-			// for workers to list individual subdirs
-			subch := make(chan string)
-			wg := sync.WaitGroup{}
-			for i := uint(0); i < be.connections-1; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for subdir := range subch {
-						listChildren(prefix+"/"+subdir, resultForwarder)
-					}
-				}()
+	if !hasSubdirs {
+		return be.listChildren(ctx, prefix, func(item driveItem) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+			return fn(restic.FileInfo{Name: item.Name, Size: item.Size})
+		})
+	}
 
-			// push subdirs to subdirs channel
-			for subdir := range subdirs {
-				subch <- subdir
-			}
-			close(subch)
+	// list subdirectories concurrently, improves restic-check by ~2 minutes for 500GB repo
 
-			// wait for workers to finish
-			wg.Wait()
+	// collect all subdirs first
+	subdirs := map[string]bool{}
+	err := be.listChildren(ctx, prefix, func(item driveItem) error { subdirs[item.Name] = true; return nil })
+	if err != nil {
+		return err
+	}
+
+	// result channel
+	resultChannel := make(chan driveItem)
+
+	// error channel, first error breaks result pump loop and is returned to the caller
+	// the channel is guaranteed to accept one error without blocking
+	errorChannel := make(chan error, 1)
+	reportError := func(err error) {
+		select {
+		case errorChannel <- err:
+			// reported error successfully
+		default:
+			// error channel is full, drop any secondary errors
 		}
+	}
+
+	// workers to list individual subdirs
+	subdirChannel := make(chan string)
+	wg := sync.WaitGroup{}
+	for i := uint(0); i < be.connections; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for subdir := range subdirChannel {
+				err := be.listChildren(ctx, prefix+"/"+subdir, func(item driveItem) error {
+					select {
+					case resultChannel <- item:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				})
+				if err != nil {
+					reportError(err)
+					return
+				}
+			}
+		}()
+	}
+
+	// workers coordinator
+	go func() {
+		defer close(resultChannel) // always terminate result pump loop
+
+		// push subdirs to subdirs channel
+		for subdir := range subdirs {
+			select {
+			case subdirChannel <- subdir:
+			case <-ctx.Done():
+				reportError(ctx.Err())
+				break
+			}
+		}
+		close(subdirChannel)
+
+		// wait for workers to finish
+		wg.Wait()
 	}()
 
-	return ch
+	// result pump loop
+	for item := range resultChannel {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errorChannel:
+			return err
+		default:
+			err := fn(restic.FileInfo{Name: item.Name, Size: item.Size})
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	select {
+	case err := <-errorChannel:
+		return err
+	default:
+	}
+
+	return nil
 }
 
 // IsNotExist returns true if the error was caused by a non-existing file
