@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/restic/restic/internal/restic"
+	rtest "github.com/restic/restic/internal/test"
 )
 
 func assertNotExist(t *testing.T, client *http.Client, path string) {
@@ -218,11 +219,13 @@ func TestListPaging(t *testing.T) {
 	// cfg.Prefix = "test-1514509488748254992"
 	// be, _ := onedrive.Create(cfg)
 
-	ch := be.List(ctx, restic.DataFile)
 	var actual int
-	for _ = range ch {
+	err := be.List(ctx, restic.DataFile, func(item restic.FileInfo) error {
 		actual++
-	}
+		return nil
+	})
+	rtest.OK(t, err)
+
 	if count != actual {
 		t.Fatalf("Wrong item count, expected %d got %d", count, actual)
 	}
