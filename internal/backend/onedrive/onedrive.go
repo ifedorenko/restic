@@ -18,7 +18,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"os/user"
 	"path"
 	"strings"
 	"sync"
@@ -436,11 +435,7 @@ type secretsFile struct {
 
 func newClient(client *http.Client, secretsFilePath string) (*http.Client, error) {
 	if secretsFilePath == "" {
-		me, err := user.Current()
-		if err != nil {
-			return nil, err
-		}
-		secretsFilePath = me.HomeDir + "/.config/restic/onedrive-secrets.json"
+		return nil, errors.Fatal("OneDrive secrets file path is not specified")
 	}
 
 	var secrets secretsFile
