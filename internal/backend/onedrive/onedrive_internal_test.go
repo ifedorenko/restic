@@ -33,7 +33,11 @@ func assertExist(t *testing.T, client *http.Client, path string) {
 }
 
 func newTestClient(t *testing.T) *http.Client {
-	client, err := newClient(http.DefaultClient, "")
+	secretsFilePath := os.Getenv("RESTIC_TEST_ONEDRIVE_SECRETS_FILE")
+	if secretsFilePath == "" {
+		t.Fatalf("Environment variable $RESTIC_TEST_ONEDRIVE_SECRETS_FILE is not set")
+	}
+	client, err := newClient(http.DefaultClient, secretsFilePath)
 	if err != nil {
 		t.Fatalf("Could not create http client %v", err)
 	}
