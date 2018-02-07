@@ -630,9 +630,9 @@ func parseConfig(loc location.Location, opts options.Options) (interface{}, erro
 	case "onedrive":
 		cfg := loc.Config.(onedrive.Config)
 		if cfg.SecretsFilePath == "" {
-			cfg.SecretsFilePath = os.Getenv("ONEDRIVE_SECRETS_FILE")
+			cfg.SecretsFilePath = os.Getenv("RESTIC_ONEDRIVE_SECRETS_FILE")
 			if cfg.SecretsFilePath == "" {
-				return nil, errors.Fatal("Environment variable $ONEDRIVE_SECRETS_FILE is not set")
+				return nil, errors.Fatal("Environment variable $RESTIC_ONEDRIVE_SECRETS_FILE is not set")
 			}
 		}
 		if err := opts.Apply(loc.Scheme, &cfg); err != nil {
