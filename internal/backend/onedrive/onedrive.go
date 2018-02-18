@@ -638,11 +638,13 @@ func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Read
 	return onedriveItemUpload(ctx, be.client, be.nakedClient, be.Filename(f), rd, f.Type == restic.ConfigFile)
 }
 
-// Load returns a reader that yields the contents of the file at h at the
-// given offset. If length is larger than zero, only a portion of the file
-// is returned. rd must be closed after use. If an error is returned, the
-// ReadCloser must be nil.
-func (be *onedriveBackend) Load(ctx context.Context, f restic.Handle, length int, offset int64) (io.ReadCloser, error) {
+// Load runs fn with a reader that yields the contents of the file at h at the
+// given offset.
+func (be *onedriveBackend) Load(ctx context.Context, h restic.Handle, length int, offset int64, fn func(rd io.Reader) error) error {
+	return backend.DefaultLoad(ctx, h, length, offset, be.openReader, fn)
+}
+
+func (be *onedriveBackend) openReader(ctx context.Context, f restic.Handle, length int, offset int64) (io.ReadCloser, error) {
 	// TODO boilerplate from rest.go, see if it's still necessary
 	if err := f.Valid(); err != nil {
 		return nil, err
