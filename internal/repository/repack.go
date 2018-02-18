@@ -20,6 +20,8 @@ import (
 func Repack(ctx context.Context, repo restic.Repository, packs restic.IDSet, keepBlobs restic.BlobSet, p *restic.Progress) (obsoletePacks restic.IDSet, err error) {
 	debug.Log("repacking %d packs while keeping %d blobs", len(packs), len(keepBlobs))
 
+	blobCountHint := repo.PackBlobCountHint()
+
 	for packID := range packs {
 		// load the complete pack into a temp file
 		h := restic.Handle{Type: restic.DataFile, Name: packID.String()}
@@ -40,7 +42,7 @@ func Repack(ctx context.Context, repo restic.Repository, packs restic.IDSet, kee
 			return nil, errors.Wrap(err, "Seek")
 		}
 
-		blobs, err := pack.List(repo.Key(), tempfile, packLength)
+		blobs, err := pack.List(repo.Key(), tempfile, packLength, blobCountHint)
 		if err != nil {
 			return nil, err
 		}

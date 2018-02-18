@@ -63,7 +63,7 @@ func verifyBlobs(t testing.TB, bufs []Buf, k *crypto.Key, rd io.ReaderAt, packSi
 	rtest.Equals(t, uint(written), packSize)
 
 	// read and parse it again
-	entries, err := pack.List(k, rd, int64(packSize))
+	entries, err := pack.List(k, rd, int64(packSize), 0)
 	rtest.OK(t, err)
 	rtest.Equals(t, len(entries), len(bufs))
 

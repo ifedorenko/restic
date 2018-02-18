@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 
 	"github.com/restic/restic/internal/cache"
 	"github.com/restic/restic/internal/errors"
@@ -588,10 +589,10 @@ func (r *Repository) List(ctx context.Context, t restic.FileType, fn func(restic
 
 // ListPack returns the list of blobs saved in the pack id and the length of
 // the file as stored in the backend.
-func (r *Repository) ListPack(ctx context.Context, id restic.ID, size int64) ([]restic.Blob, int64, error) {
+func (r *Repository) ListPack(ctx context.Context, id restic.ID, size int64, entriesHint int) ([]restic.Blob, int64, error) {
 	h := restic.Handle{Type: restic.DataFile, Name: id.String()}
 
-	blobs, err := pack.List(r.Key(), restic.ReaderAt(r.Backend(), h), size)
+	blobs, err := pack.List(r.Key(), restic.ReaderAt(r.Backend(), h), size, entriesHint)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -725,4 +726,50 @@ func DownloadAndHash(ctx context.Context, repo restic.Repository, h restic.Handl
 	}
 
 	return tmpfile, hash, size, err
+}
+
+// PackBlobCountHint returns 98th percentile of number of blobs in repository pack files
+// The result is calculated using repository index and is relatively inexpensive to compute
+// Returns 0 if repository index is not available.
+func (r *Repository) PackBlobCountHint() int {
+
+	totalBlobs := int(0)
+
+	// packID => number of blobs in the pack
+	packBlobCount := make(map[restic.ID]int)
+	for blob := range r.idx.Each(context.Background()) {
+		totalBlobs++
+		if _, ok := packBlobCount[blob.PackID]; ok {
+			packBlobCount[blob.PackID]++
+		} else {
+			packBlobCount[blob.PackID] = 1
+		}
+	}
+
+	// blob count => number of packs with that many blobs
+	blobCountPackCount := make(map[int]int)
+	for _, blobCount := range packBlobCount {
+		if _, ok := blobCountPackCount[blobCount]; ok {
+			blobCountPackCount[blobCount]++
+		} else {
+			blobCountPackCount[blobCount] = 1
+		}
+	}
+	var blobCounts []int
+	for blobCount := range blobCountPackCount {
+		blobCounts = append(blobCounts, blobCount)
+	}
+
+	cutoff := (totalBlobs * 100) / 98
+	sort.Ints(blobCounts)
+
+	count := int(0)
+	for _, blobCount := range blobCounts {
+		count += blobCountPackCount[blobCount] * blobCount
+		if count >= cutoff {
+			return blobCount
+		}
+	}
+
+	return 0
 }

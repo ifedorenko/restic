@@ -73,9 +73,10 @@ func selectBlobs(t *testing.T, repo restic.Repository, p float32) (list1, list2 
 	list2 = restic.NewBlobSet()
 
 	blobs := restic.NewBlobSet()
+	blobCountHint := repo.PackBlobCountHint()
 
 	err := repo.List(context.TODO(), restic.DataFile, func(id restic.ID, size int64) error {
-		entries, _, err := repo.ListPack(context.TODO(), id, size)
+		entries, _, err := repo.ListPack(context.TODO(), id, size, blobCountHint)
 		if err != nil {
 			t.Fatalf("error listing pack %v: %v", id, err)
 		}

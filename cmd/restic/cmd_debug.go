@@ -79,10 +79,12 @@ type Blob struct {
 
 func printPacks(repo *repository.Repository, wr io.Writer) error {
 
+	blobCountHint := repo.PackBlobCountHint()
+
 	return repo.List(context.TODO(), restic.DataFile, func(id restic.ID, size int64) error {
 		h := restic.Handle{Type: restic.DataFile, Name: id.String()}
 
-		blobs, err := pack.List(repo.Key(), restic.ReaderAt(repo.Backend(), h), size)
+		blobs, err := pack.List(repo.Key(), restic.ReaderAt(repo.Backend(), h), size, blobCountHint)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error for pack %v: %v\n", id.Str(), err)
 			return nil

@@ -675,7 +675,7 @@ func checkPack(ctx context.Context, r restic.Repository, id restic.ID) error {
 		return errors.Errorf("Pack ID does not match, want %v, got %v", id.Str(), hash.Str())
 	}
 
-	blobs, err := pack.List(r.Key(), packfile, size)
+	blobs, err := pack.List(r.Key(), packfile, size, r.PackBlobCountHint())
 	if err != nil {
 		return err
 	}

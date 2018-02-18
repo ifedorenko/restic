@@ -392,3 +392,13 @@ func TestRepositoryIncrementalIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryPackBlobCountHint(t *testing.T) {
+	repodir, cleanup := rtest.Env(t, repoFixture)
+	defer cleanup()
+
+	repo := repository.TestOpenLocal(t, repodir)
+	repo.LoadIndex(context.TODO())
+
+	rtest.Equals(t, 7, repo.PackBlobCountHint())
+}

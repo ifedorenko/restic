@@ -42,7 +42,7 @@ func New(ctx context.Context, repo restic.Repository, ignorePacks restic.IDSet, 
 	defer p.Done()
 
 	ch := make(chan worker.Job)
-	go list.AllPacks(ctx, repo, ignorePacks, ch)
+	go list.AllPacks(ctx, repo, ignorePacks, repo.PackBlobCountHint(), ch)
 
 	idx = newIndex()
 

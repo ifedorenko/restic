@@ -179,8 +179,8 @@ var (
 
 const (
 	maxHeaderSize = 16 * 1024 * 1024
-	// number of header enries to download as part of header-length request
-	eagerEntries = 15
+	// default number of header enries to download as part of header-length request
+	defaultEagerEntries = 15
 )
 
 // readRecords reads up to max records from the underlying ReaderAt, returning
@@ -235,7 +235,7 @@ func readRecords(rd io.ReaderAt, size int64, max int) ([]byte, int, error) {
 
 // readHeader reads the header at the end of rd. size is the length of the
 // whole data accessible in rd.
-func readHeader(rd io.ReaderAt, size int64) ([]byte, error) {
+func readHeader(rd io.ReaderAt, size int64, entryCountHint int) ([]byte, error) {
 	debug.Log("size: %v", size)
 	if size < int64(minFileSize) {
 		err := InvalidFileError{Message: "file is too small"}
@@ -245,6 +245,11 @@ func readHeader(rd io.ReaderAt, size int64) ([]byte, error) {
 	// assuming extra request is significantly slower than extra bytes download,
 	// eagerly download eagerEntries header entries as part of header-length request.
 	// only make second request if actual number of entries is greater than eagerEntries
+
+	eagerEntries := entryCountHint
+	if eagerEntries == 0 {
+		eagerEntries = defaultEagerEntries
+	}
 
 	b, c, err := readRecords(rd, size, eagerEntries)
 	if err != nil {
@@ -271,8 +276,8 @@ func (e InvalidFileError) Error() string {
 }
 
 // List returns the list of entries found in a pack file.
-func List(k *crypto.Key, rd io.ReaderAt, size int64) (entries []restic.Blob, err error) {
-	buf, err := readHeader(rd, size)
+func List(k *crypto.Key, rd io.ReaderAt, size int64, entryCountHint int) (entries []restic.Blob, err error) {
+	buf, err := readHeader(rd, size, entryCountHint)
 	if err != nil {
 		return nil, err
 	}
