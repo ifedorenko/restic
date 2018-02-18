@@ -98,6 +98,7 @@ func createTestBackend(t *testing.T) *onedriveBackend {
 
 	cfg := NewConfig()
 	cfg.Prefix = prefix
+	cfg.SecretsFilePath = os.Getenv("RESTIC_TEST_ONEDRIVE_SECRETS_FILE")
 
 	be, err := open(context.TODO(), cfg, http.DefaultTransport, true)
 	if err != nil {
