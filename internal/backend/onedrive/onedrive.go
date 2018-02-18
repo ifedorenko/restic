@@ -4,7 +4,6 @@ package onedrive
 // TODO use rtests in internal test
 // TODO CPU utilization (~70% on Intel N3700) appears too high
 //      investigate what uses the CPU so much
-// TODO test-specific secrets file location
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
 //      or empty recycle bin as part of delete
