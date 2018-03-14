@@ -1,12 +1,15 @@
 package onedrive
 
 // TODO logging and error stack traces
+// TODO restic allows backends overwrite existing files now
+//      this removes the need for onedriveItemUpload(overwriteIfExists)
+//      and, more interestingly, entire createFolders() func
 // TODO use rtests in internal test
 // TODO CPU utilization (~70% on Intel N3700) appears too high
 //      investigate what uses the CPU so much
 // TODO make upload fragment size configurable
 // TODO skip recycle bin on delete (does not appear to be possible)
-//      or empty recycle bin as part of delete
+//      or empty recycle bin as part of delete (does not appear to be possible either)
 // TODO consider adding HTTP METHOD/PATH to httpError
 
 import (
@@ -16,7 +19,6 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -241,45 +243,9 @@ func onedriveCreateFolder(ctx context.Context, client *http.Client, path string)
 	return nil
 }
 
-// borrowed from s3.go
-func readerSize(rd io.Reader) (int64, error) {
-	var size int64 = -1
-	type lenner interface {
-		Len() int
-	}
-
-	// find size for reader
-	if f, ok := rd.(*os.File); ok {
-		fi, err := f.Stat()
-		if err != nil {
-			return size, errors.Wrap(err, "Stat")
-		}
-
-		pos, err := f.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return size, errors.Wrap(err, "Seek")
-		}
-
-		size = fi.Size() - pos
-	} else if l, ok := rd.(lenner); ok {
-		size = int64(l.Len())
-	}
-
-	return size, nil
-}
-
 // fails if overwriteIfExists==false and the item exists
-func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *http.Client, path string, rd io.Reader, overwriteIfExists bool) error {
-	length, err := readerSize(rd)
-	if err != nil {
-		return err
-	}
-	if length < 0 {
-		return errors.Errorf("could not determine reader size")
-	}
-
-	// make sure that client.Post() cannot close the reader by wrapping it
-	rd = ioutil.NopCloser(rd)
+func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *http.Client, path string, rd restic.RewindReader, overwriteIfExists bool) error {
+	length := rd.Length()
 
 	// will always use POST+PUT sequence to upload items
 	// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession
@@ -321,7 +287,8 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 		if contentLength > uploadFragmentSize {
 			contentLength = uploadFragmentSize
 		}
-		req, err := http.NewRequest("PUT", uploadURL, io.LimitReader(rd, contentLength))
+		// wrap the reader so that net/http client cannot close the reader
+		req, err := http.NewRequest("PUT", uploadURL, io.LimitReader(ioutil.NopCloser(rd), contentLength))
 		if err != nil {
 			return err
 		}
@@ -620,8 +587,8 @@ func (be *onedriveBackend) createFolders(ctx context.Context, folderPath string)
 	return nil
 }
 
-// Save stores the data in the backend under the given handle.
-func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd io.Reader) error {
+// Save stores the data from rd under the given handle.
+func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd restic.RewindReader) error {
 	ctx, cancel := timeoutContext(ctx, be.timeout)
 	defer cancel()
 
