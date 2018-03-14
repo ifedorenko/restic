@@ -2,7 +2,6 @@ package onedrive
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -149,10 +147,10 @@ func assertUpload(t *testing.T, be restic.Backend, size int64) {
 	ctx := context.Background()
 
 	f := restic.Handle{Type: restic.DataFile, Name: tmpfile.Name()}
-	err := be.Save(ctx, f, tmpfile)
-	if err != nil {
-		t.Fatalf("Save failed %v", err)
-	}
+	rd, err := restic.NewFileReader(tmpfile)
+	rtest.OK(t, err)
+	err = be.Save(ctx, f, rd)
+	rtest.OK(t, err)
 
 	if fileInfo, err := be.Stat(ctx, f); err != nil || size != fileInfo.Size {
 		fmt.Printf("FAILED\n")
@@ -193,12 +191,14 @@ func TestLargeFileImmutableUpload(t *testing.T) {
 	defer func() { tmpfile.Close(); os.Remove(tmpfile.Name()) }()
 
 	f := restic.Handle{Type: restic.DataFile, Name: "10M"}
-	err := be.Save(ctx, f, tmpfile)
-	if err != nil {
-		t.Fatalf("Failed %v", err)
-	}
-	tmpfile.Seek(0, os.SEEK_SET)
-	err = be.Save(ctx, f, tmpfile)
+	rd, err := restic.NewFileReader(tmpfile)
+	rtest.OK(t, err)
+	err = be.Save(ctx, f, rd)
+	rtest.OK(t, err)
+
+	err = rd.Rewind()
+	rtest.OK(t, err)
+	err = be.Save(ctx, f, rd)
 	if herr, ok := err.(httpError); !ok || herr.statusCode != http.StatusPreconditionFailed {
 		t.Fatalf("expected upload to failed with 412/StatusPreconditionFailed, got %v", err)
 	}
@@ -214,10 +214,9 @@ func TestListPaging(t *testing.T) {
 	const count = 432
 	for i := 0; i < count; i++ {
 		f := restic.Handle{Type: restic.DataFile, Name: fmt.Sprintf("temp-%d", i)}
-		err := be.Save(ctx, f, strings.NewReader(fmt.Sprintf("temp-%d", i)))
-		if err != nil {
-			t.Fatalf("Failed %v", err)
-		}
+		rd := restic.NewByteReader([]byte(fmt.Sprintf("temp-%d", i)))
+		err := be.Save(ctx, f, rd)
+		rtest.OK(t, err)
 	}
 
 	// cfg := onedrive.NewConfig()
@@ -257,10 +256,8 @@ func disabledTestIntermitentInvalidFragmentLength(t *testing.T) {
 			data := []byte(fmt.Sprintf("random test blob %v", i))
 			id := restic.Hash(data)
 			h := restic.Handle{Type: restic.DataFile, Name: id.String()}
-			err := be.Save(ctx, h, bytes.NewReader(data))
-			if err != nil {
-				t.Error(err)
-			}
+			err := be.Save(ctx, h, restic.NewByteReader(data))
+			rtest.OK(t, err)
 		}
 	}
 
