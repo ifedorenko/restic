@@ -1,9 +1,6 @@
 package onedrive
 
 // TODO logging and error stack traces
-// TODO restic allows backends overwrite existing files now
-//      this removes the need for onedriveItemUpload(overwriteIfExists)
-//      and, more interestingly, entire createFolders() func
 // TODO use rtests in internal test
 // TODO CPU utilization (~70% on Intel N3700) appears too high
 //      investigate what uses the CPU so much
@@ -244,7 +241,7 @@ func onedriveCreateFolder(ctx context.Context, client *http.Client, path string)
 }
 
 // fails if overwriteIfExists==false and the item exists
-func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *http.Client, path string, rd restic.RewindReader, overwriteIfExists bool) error {
+func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *http.Client, path string, rd restic.RewindReader) error {
 	length := rd.Length()
 
 	// will always use POST+PUT sequence to upload items
@@ -257,9 +254,6 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 			return "", err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
-		if !overwriteIfExists {
-			req.Header.Set("If-None-Match", "*")
-		}
 		resp, err := client.Do(req.WithContext(ctx))
 		if err != nil {
 			return "", err
@@ -376,10 +370,6 @@ type onedriveBackend struct {
 	sem         *backend.Semaphore
 	connections uint
 
-	// see createFolders
-	folders     map[string]*sync.Once
-	foldersLock sync.Mutex
-
 	// request timeout
 	timeout time.Duration
 
@@ -467,14 +457,13 @@ func open(ctx context.Context, cfg Config, rt http.RoundTripper, createNew bool)
 		basedir:     cfg.Prefix,
 		nakedClient: nakedClient,
 		client:      client,
-		folders:     make(map[string]*sync.Once),
 		sem:         sem,
 		connections: cfg.Connections,
 		timeout:     cfg.Timeout,
 	}
 
 	if createNew {
-		err = be.createFolders(ctx, cfg.Prefix)
+		err = onedriveCreateFolder(ctx, be.client, cfg.Prefix)
 		if err != nil {
 			return nil, err
 		}
@@ -543,50 +532,6 @@ func (be *onedriveBackend) Close() error {
 	return nil
 }
 
-// creates specified folder and any missing parent folders
-func (be *onedriveBackend) createFolders(ctx context.Context, folderPath string) error {
-	// this is likely overkill, but I wanted to implement the following behaviour:
-	// * folders known to exist are skipped without remote requests
-	// * folders that are not known to exist are guaranteed to be created only once
-	//   (even when multiple threads create the same folder concurrently)
-	// * different threads can concurrently create different folders
-
-	// returns per-folde sync.Once
-	// uses sync.Mutex to serialize concurrent access
-	folderOnce := func(path string) *sync.Once {
-		be.foldersLock.Lock()
-		defer be.foldersLock.Unlock()
-
-		once := be.folders[path]
-		if once == nil {
-			once = &sync.Once{}
-			be.folders[path] = once
-		}
-
-		return once
-	}
-
-	// creates the folder, if the folder is not known to exist
-	// uses sync.Once to implement only-once behaviour
-	ifCreateFolder := func(path string) error {
-		once := folderOnce(path)
-		var err error
-		once.Do(func() {
-			err = onedriveCreateFolder(ctx, be.client, path)
-		})
-		return err
-	}
-
-	for _, path := range pathNames(folderPath) {
-		err := ifCreateFolder(path)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 // Save stores the data from rd under the given handle.
 func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd restic.RewindReader) error {
 	ctx, cancel := timeoutContext(ctx, be.timeout)
@@ -595,13 +540,7 @@ func (be *onedriveBackend) Save(ctx context.Context, f restic.Handle, rd restic.
 	be.sem.GetToken()
 	defer be.sem.ReleaseToken()
 
-	// precreate parent directories to avoid intermittent "412/Precondition failed" errors
-	err := be.createFolders(ctx, be.Dirname(f))
-	if err != nil {
-		return err
-	}
-
-	return onedriveItemUpload(ctx, be.client, be.nakedClient, be.Filename(f), rd, f.Type == restic.ConfigFile)
+	return onedriveItemUpload(ctx, be.client, be.nakedClient, be.Filename(f), rd)
 }
 
 // Load runs fn with a reader that yields the contents of the file at h at the
