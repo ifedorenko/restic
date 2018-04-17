@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,16 +108,6 @@ func createTestBackend(t *testing.T) *onedriveBackend {
 	return be
 }
 
-func TestCreateFolders(t *testing.T) {
-	be := createTestBackend(t)
-	defer be.Delete(context.TODO())
-
-	err := be.createFolders(context.TODO(), be.basedir+"/data/aa")
-	if err != nil {
-		t.Fatalf("failed to create folders: %v", err)
-	}
-}
-
 func createTestFile(t *testing.T, prefix string, size int64) *os.File {
 	// TODO is there an existing test helper?
 
@@ -178,30 +170,6 @@ func TestLargeFileUpload(t *testing.T) {
 	assertUpload(t, be, 3*uploadFragmentSize-1)
 	assertUpload(t, be, 3*uploadFragmentSize)
 	assertUpload(t, be, 3*uploadFragmentSize+1)
-}
-
-func TestLargeFileImmutableUpload(t *testing.T) {
-	skipSlowTest(t)
-
-	ctx := context.TODO()
-	be := createTestBackend(t)
-	defer be.Delete(ctx)
-
-	tmpfile := createTestFile(t, "10M", 10*1024*1024)
-	defer func() { tmpfile.Close(); os.Remove(tmpfile.Name()) }()
-
-	f := restic.Handle{Type: restic.DataFile, Name: "10M"}
-	rd, err := restic.NewFileReader(tmpfile)
-	rtest.OK(t, err)
-	err = be.Save(ctx, f, rd)
-	rtest.OK(t, err)
-
-	err = rd.Rewind()
-	rtest.OK(t, err)
-	err = be.Save(ctx, f, rd)
-	if herr, ok := err.(httpError); !ok || herr.statusCode != http.StatusPreconditionFailed {
-		t.Fatalf("expected upload to failed with 412/StatusPreconditionFailed, got %v", err)
-	}
 }
 
 func TestListPaging(t *testing.T) {
@@ -269,4 +237,51 @@ func disabledTestIntermitentInvalidFragmentLength(t *testing.T) {
 		items <- i
 	}
 	close(items)
+}
+
+func TestConcurrentDirectoryItemsCreate(t *testing.T) {
+	// this test asserts intemediate directories can be created concurrently
+	// background:
+	// restic used to require backends to fail writing over existing items
+	// onedrive implemented that requirement with http hreader If-None-Match=*
+	// which resulted in infrequent "412/Precondition failed" errors creating
+	// intermediate directories.
+	// as a workaround, onedrive backend explicitly created directories and
+	// used client-side synchronization to avoid concurrent creating of the
+	// same directory.
+	// all that complexity was removed after restic no loner requires backends
+	// to fail writing over existing files.
+
+	ctx := context.TODO()
+	be := createTestBackend(t)
+	clients := 5
+	defer be.Delete(ctx)
+
+	failures := int32(0)
+	for iter := 0; iter < 10; iter++ {
+		ch := make(chan bool)
+		var wg sync.WaitGroup
+		dir := fmt.Sprintf("%s/dir-%d/a/b/c/d", be.basedir, iter)
+		for client := 0; client < clients; client++ {
+			path := fmt.Sprintf("%s//%d", dir, client)
+			go func() {
+				<-ch // block until the channel is closed
+				err := onedriveItemUpload(ctx, be.client, be.nakedClient, path, restic.NewByteReader([]byte("data")))
+				if err != nil {
+					atomic.AddInt32(&failures, 1)
+					fmt.Printf("%s: %v\n", path, err)
+				}
+				wg.Done()
+			}()
+			wg.Add(1)
+		}
+		close(ch)
+		wg.Wait()
+		rtest.Equals(t, int32(0), failures)
+		children, nextLink, err := onedriveGetChildren(ctx, be.client, onedriveGetChildrenURL(dir))
+		rtest.OK(t, err)
+		rtest.Equals(t, "", nextLink)
+		rtest.Equals(t, clients, len(children))
+		fmt.Printf("iter=%d\n", iter)
+	}
 }
