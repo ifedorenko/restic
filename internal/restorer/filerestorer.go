@@ -94,7 +94,10 @@ type processingInfo struct {
 	files map[*fileInfo]error
 }
 
-func (r *fileRestorer) restoreFiles(ctx context.Context, onError func(path string, err error)) error {
+func (r *fileRestorer) restoreFiles(ctx context.Context,
+	reportDoneFileBlob func(path string, size uint),
+	reportDoneFile func(path string),
+	onError func(path string, err error)) error {
 	for _, file := range r.files {
 		dbgmsg := file.location + ": "
 		r.idx.forEachFilePack(file, func(packIdx int, packID restic.ID, packBlobs []restic.Blob) bool {
@@ -124,6 +127,7 @@ func (r *fileRestorer) restoreFiles(ctx context.Context, onError func(path strin
 			} else {
 				onError(file.location, err)
 			}
+			reportDoneFile(file.location)
 		}
 	}
 
@@ -188,16 +192,20 @@ func (r *fileRestorer) restoreFiles(ctx context.Context, onError func(path strin
 			} else {
 				r.idx.forEachFilePack(file, func(packIdx int, packID restic.ID, packBlobs []restic.Blob) bool {
 					file.blobs = file.blobs[len(packBlobs):]
+					for _, blob := range packBlobs {
+						reportDoneFileBlob(file.location, blob.Length)
+					}
 					return false // only interesed in the first pack
 				})
 				if len(file.blobs) == 0 {
 					r.filesWriter.close(target)
 					delete(inprogress, file)
+					reportDoneFile(file.location)
 				}
 				success = append(success, file)
 			}
 		}
-		// update the queue and requeueu the pack as necessary
+		// update the queue and requeue the pack as necessary
 		if !queue.requeuePack(pack, success, failure) {
 			r.packCache.remove(pack.id)
 			debug.Log("Purged used up pack %s from pack cache", pack.id.Str())

@@ -7,6 +7,7 @@ import (
 
 	"github.com/restic/restic/internal/crypto"
 	"github.com/restic/restic/internal/errors"
+	"github.com/restic/restic/internal/ui"
 
 	"github.com/restic/restic/internal/debug"
 	"github.com/restic/restic/internal/fs"
@@ -176,7 +177,7 @@ func (res *Restorer) restoreHardlinkAt(node *restic.Node, target, path, location
 
 // RestoreTo creates the directories and files in the snapshot below dst.
 // Before an item is created, res.Filter is called.
-func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
+func (res *Restorer) RestoreTo(ctx context.Context, ui ui.ProgressUI, dst string, verify bool) error {
 	var err error
 	if !filepath.IsAbs(dst) {
 		dst, err = filepath.Abs(dst)
@@ -192,13 +193,18 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 
 	idx := restic.NewHardlinkIndex()
 
+	pm := newProgressUI(ui)
+	defer pm.done()
+
 	filerestorer := newFileRestorer(dst, res.repo.Backend().Load, res.repo.Key(), filePackTraverser{lookup: res.repo.Index().Lookup})
 
 	// first tree pass: create directories and collect all files to restore
+	pm.startFileListing()
 	err = res.traverseTree(ctx, dst, string(filepath.Separator), *res.sn.Tree, treeVisitor{
 		enterDir: func(node *restic.Node, target, location string) error {
 			// create dir with default permissions
 			// #leaveDir restores dir metadata after visiting all children
+			defer pm.addDir()
 			return fs.MkdirAll(target, 0700)
 		},
 
@@ -211,17 +217,21 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 			}
 
 			if node.Type != "file" {
+				pm.addSpecialFile()
 				return nil
 			}
 
 			if node.Links > 1 {
 				if idx.Has(node.Inode, node.DeviceID) {
+					pm.addHardlink()
 					return nil
 				}
 				idx.Add(node.Inode, node.DeviceID, location)
 			}
 
 			filerestorer.addFile(location, node.Content)
+
+			pm.addFile(node.Size)
 
 			return nil
 		},
@@ -231,27 +241,51 @@ func (res *Restorer) RestoreTo(ctx context.Context, dst string) error {
 		return err
 	}
 
-	err = filerestorer.restoreFiles(ctx, func(location string, err error) { res.Error(location, err) })
+	pm.startFileContent()
+	err = filerestorer.restoreFiles(ctx,
+		func(location string, size uint) { pm.completeBlob(size - uint(crypto.Extension)) },
+		func(location string) { pm.completeFile() },
+		func(location string, err error) { res.Error(location, err) })
 	if err != nil {
 		return err
 	}
 
 	// second tree pass: restore special files and filesystem metadata
-	return res.traverseTree(ctx, dst, string(filepath.Separator), *res.sn.Tree, treeVisitor{
+	pm.startMetadata()
+	err = res.traverseTree(ctx, dst, string(filepath.Separator), *res.sn.Tree, treeVisitor{
 		enterDir: noop,
 		visitNode: func(node *restic.Node, target, location string) error {
+			defer pm.completeMetadata()
+
 			if idx.Has(node.Inode, node.DeviceID) && idx.GetFilename(node.Inode, node.DeviceID) != location {
+				defer pm.completeHardlink()
 				return res.restoreHardlinkAt(node, filerestorer.targetPath(idx.GetFilename(node.Inode, node.DeviceID)), target, location)
 			}
 
 			if node.Type != "file" {
+				defer pm.completeSpecialFile()
 				return res.restoreNodeTo(ctx, node, target, location)
 			}
 
 			return res.restoreNodeMetadataTo(node, target, location)
 		},
-		leaveDir: restoreNodeMetadata,
+		leaveDir: func(node *restic.Node, target, location string) error {
+			defer pm.completeMetadata()
+			return restoreNodeMetadata(node, target, location)
+		},
 	})
+	if err != nil {
+		return err
+	}
+
+	if verify {
+		err = res.verifyFiles(ctx, pm, dst)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Snapshot returns the snapshot this restorer is configured to use.
@@ -260,18 +294,30 @@ func (res *Restorer) Snapshot() *restic.Snapshot {
 }
 
 // VerifyFiles reads all snapshot files and verifies their contents
-func (res *Restorer) VerifyFiles(ctx context.Context, dst string) (int, error) {
+func (res *Restorer) verifyFiles(ctx context.Context, pm *progressUI, dst string) error {
 	// TODO multithreaded?
 
-	count := 0
+	idx := restic.NewHardlinkIndex()
+
+	pm.startVerify()
 	err := res.traverseTree(ctx, dst, string(filepath.Separator), *res.sn.Tree, treeVisitor{
 		enterDir: func(node *restic.Node, target, location string) error { return nil },
 		visitNode: func(node *restic.Node, target, location string) error {
-			if node.Type != "file" {
+			if node.Type == "dir" {
 				return nil
 			}
+			if node.Type != "file" {
+				pm.completeVerifyFile() // special file
+				return nil
+			}
+			if node.Links > 1 {
+				if idx.Has(node.Inode, node.DeviceID) {
+					pm.completeVerifyFile() // already verified target of this hardlink
+					return nil
+				}
+				idx.Add(node.Inode, node.DeviceID, "")
+			}
 
-			count++
 			stat, err := os.Stat(target)
 			if err != nil {
 				return err
@@ -297,12 +343,15 @@ func (res *Restorer) VerifyFiles(ctx context.Context, dst string) (int, error) {
 					return errors.Errorf("Unexpected contents starting at offset %d", offset)
 				}
 				offset += int64(length)
+				pm.completeVerifyBlob(length)
 			}
+
+			pm.completeVerifyFile()
 
 			return nil
 		},
 		leaveDir: func(node *restic.Node, target, location string) error { return nil },
 	})
 
-	return count, err
+	return err
 }
