@@ -253,7 +253,7 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 		if err != nil {
 			return "", err
 		}
-		req.Header.Set("Content-Type", "binary/octet-stream")
+		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req.WithContext(ctx))
 		if err != nil {
 			return "", err
@@ -287,7 +287,10 @@ func onedriveItemUpload(ctx context.Context, client *http.Client, nakedClient *h
 			return err
 		}
 		req.Header.Set("Content-Type", "binary/octet-stream")
-		// req.Header.Add("Content-Length", fmt.Sprintf("%d", contentLength))
+		// Need to set Request.ContentLength to suppress Transfer-Encoding=chunked http header.
+		// Having that header results in intermittent http 400/invalidRequest failures with
+		// "Declared fragment length does not match the provided number of bytes" message.
+		req.ContentLength = contentLength
 		req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", pos, pos+contentLength-1, length))
 
 		// https://docs.microsoft.com/en-us/onedrive/developer/rest-api/api/driveitem_createuploadsession#remarks
