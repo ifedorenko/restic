@@ -138,7 +138,7 @@ func assertUpload(t *testing.T, be restic.Backend, size int64) {
 
 	ctx := context.Background()
 
-	f := restic.Handle{Type: restic.DataFile, Name: tmpfile.Name()}
+	f := restic.Handle{Type: restic.PackFile, Name: tmpfile.Name()}
 	rd, err := restic.NewFileReader(tmpfile)
 	rtest.OK(t, err)
 	err = be.Save(ctx, f, rd)
@@ -181,7 +181,7 @@ func TestListPaging(t *testing.T) {
 
 	const count = 432
 	for i := 0; i < count; i++ {
-		f := restic.Handle{Type: restic.DataFile, Name: fmt.Sprintf("temp-%d", i)}
+		f := restic.Handle{Type: restic.PackFile, Name: fmt.Sprintf("temp-%d", i)}
 		rd := restic.NewByteReader([]byte(fmt.Sprintf("temp-%d", i)))
 		err := be.Save(ctx, f, rd)
 		rtest.OK(t, err)
@@ -192,7 +192,7 @@ func TestListPaging(t *testing.T) {
 	// be, _ := onedrive.Create(cfg)
 
 	var actual int
-	err := be.List(ctx, restic.DataFile, func(item restic.FileInfo) error {
+	err := be.List(ctx, restic.PackFile, func(item restic.FileInfo) error {
 		actual++
 		return nil
 	})
@@ -223,7 +223,7 @@ func disabledTestIntermitentInvalidFragmentLength(t *testing.T) {
 			}
 			data := []byte(fmt.Sprintf("random test blob %v", i))
 			id := restic.Hash(data)
-			h := restic.Handle{Type: restic.DataFile, Name: id.String()}
+			h := restic.Handle{Type: restic.PackFile, Name: id.String()}
 			err := be.Save(ctx, h, restic.NewByteReader(data))
 			rtest.OK(t, err)
 		}
